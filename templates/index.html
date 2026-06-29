@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rover Mission Control</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+
+<header class="header">
+    <div class="header-left">
+        <div class="header-logo">⬡</div>
+        <div>
+            <div class="header-title">Rover Mission Control</div>
+            <div class="header-sub">AI-Lab Lunar Rover · South Pole-Aitken Basin · Brookhaven National Laboratory</div>
+        </div>
+    </div>
+    <div class="header-right">
+        <span id="connection-status" class="conn-status">● Connecting...</span>
+    </div>
+</header>
+
+<nav class="tab-bar">
+    <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+    <button class="tab-btn" data-tab="logs">Mission Logs</button>
+    <button class="tab-btn" data-tab="sensors">Sensor Analysis</button>
+</nav>
+
+<div class="app-body">
+
+    <!-- ── DASHBOARD TAB ─────────────────────────── -->
+    <section class="tab-pane active" id="tab-dashboard">
+        <div class="dash-grid">
+
+            <!-- LEFT: Controls + Controller -->
+            <aside class="dash-left">
+
+                <div class="card">
+                    <div class="card-header">Mission Setup</div>
+                    <div class="card-body">
+                        <label>Dataset</label>
+                        <select id="dataset-select">
+                            <option value="simple">Simple Survey (Easy)</option>
+                            <option value="complex">Complex Terrain (Hard)</option>
+                            <option value="crater">Crater Exploration (Medium)</option>
+                        </select>
+                        <label>Mission Type</label>
+                        <select id="mission-select">
+                            <option value="explore">Exploration</option>
+                            <option value="sample_collection">Sample Collection</option>
+                            <option value="hazard_assessment">Hazard Assessment</option>
+                        </select>
+                        <div class="checkbox-row">
+                            <input type="checkbox" id="llm-toggle">
+                            <label for="llm-toggle">Enable LLM Reasoning</label>
+                        </div>
+                        <button id="start-mission-btn" class="btn btn-primary">Start Mission</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        Field Scanner
+                        <span class="hint">probability &amp; bearing</span>
+                    </div>
+                    <div class="card-body" style="padding:6px 8px;">
+                        <div id="field-scanner" class="field-scanner">
+                            <div class="scan-row" data-cat="samples">
+                                <span class="scan-arrow" id="scan-samples-arrow">·</span>
+                                <div class="scan-info">
+                                    <div class="scan-label">🪨 Samples</div>
+                                    <div class="scan-bar"><div class="scan-fill" id="scan-samples-fill"></div></div>
+                                </div>
+                                <span class="scan-pct" id="scan-samples-pct">--</span>
+                            </div>
+                            <div class="scan-row" data-cat="debris">
+                                <span class="scan-arrow" id="scan-debris-arrow">·</span>
+                                <div class="scan-info">
+                                    <div class="scan-label">⛰ Debris</div>
+                                    <div class="scan-bar"><div class="scan-fill debris" id="scan-debris-fill"></div></div>
+                                </div>
+                                <span class="scan-pct" id="scan-debris-pct">--</span>
+                            </div>
+                            <div class="scan-row" data-cat="radiation">
+                                <span class="scan-arrow" id="scan-radiation-arrow">·</span>
+                                <div class="scan-info">
+                                    <div class="scan-label">☢ Radiation</div>
+                                    <div class="scan-bar"><div class="scan-fill radiation" id="scan-radiation-fill"></div></div>
+                                </div>
+                                <span class="scan-pct" id="scan-radiation-pct">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Active Missions</div>
+                    <div class="card-body">
+                        <div id="missions-list" class="missions-list">
+                            <p class="placeholder">No active missions</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        Rover Controller
+                        <span class="hint">WASD / Arrows</span>
+                    </div>
+                    <div class="card-body controller-body">
+                        <div class="ctrl-stats">
+                            <span id="ctrl-batt">🔋 100%</span>
+                            <span id="ctrl-odo">📏 0.0 m</span>
+                        </div>
+                        <div class="dpad8">
+                            <!-- Row 1: NW · N · NE -->
+                            <button class="dpad-btn diag" id="btn-fl" onclick="moveRover('forward-left')"  title="Forward-Left">↖</button>
+                            <button class="dpad-btn"      id="btn-fwd" onclick="moveRover('forward')"      title="Forward (W)">▲</button>
+                            <button class="dpad-btn diag" id="btn-fr" onclick="moveRover('forward-right')" title="Forward-Right">↗</button>
+                            <!-- Row 2: W · center · E -->
+                            <button class="dpad-btn"      id="btn-left"  onclick="moveRover('left')"  title="Strafe Left (A)">◄</button>
+                            <button class="dpad-btn dpad-center" onclick="moveRover('reset')" title="Reset to base">⬤</button>
+                            <button class="dpad-btn"      id="btn-right" onclick="moveRover('right')" title="Strafe Right (D)">►</button>
+                            <!-- Row 3: SW · S · SE -->
+                            <button class="dpad-btn diag" id="btn-bl" onclick="moveRover('back-left')"  title="Back-Left">↙</button>
+                            <button class="dpad-btn"      id="btn-back"  onclick="moveRover('back')"   title="Back (S)">▼</button>
+                            <button class="dpad-btn diag" id="btn-br" onclick="moveRover('back-right')" title="Back-Right">↘</button>
+                        </div>
+                        <!-- Rotate buttons -->
+                        <div class="rotate-row">
+                            <button class="rotate-btn" onclick="rotateRover(-45)" title="Rotate left 45°">↺ 45°</button>
+                            <span class="rotate-label">Rotate</span>
+                            <button class="rotate-btn" onclick="rotateRover(45)"  title="Rotate right 45°">↻ 45°</button>
+                        </div>
+                        <div class="speed-row">
+                            <label>Speed</label>
+                            <input type="range" id="speed-slider" min="0.5" max="10" step="0.5" value="2"
+                                   oninput="setSpeed(this.value)">
+                            <span id="speed-label">2 m</span>
+                        </div>
+
+                        <button id="collect-btn" class="btn-collect" onclick="collectSample()" disabled>
+                            🪨 Collect Sample
+                        </button>
+                        <div id="nearest-sample" class="nearest-sample">No samples remaining</div>
+
+                        <div id="rover-coords" class="rover-coords">x: 0.0, y: 0.0 | hdg: 0°</div>
+                    </div>
+                </div>
+
+            </aside>
+
+            <!-- CENTER: Map -->
+            <main class="dash-center">
+
+                <div id="mission-status-strip" class="card status-strip" style="display:none;">
+                    <div class="card-body" style="padding:8px 12px;">
+                        <div id="mission-info"><p class="placeholder">No active mission</p></div>
+                    </div>
+                </div>
+
+                <div class="card map-card">
+                    <div class="card-header">
+                        Terrain Map
+                        <span id="rover-coords-map" class="live-ts">x: 0.0, y: 0.0 | hdg: 0°</span>
+                        <div id="hazard-strip" class="hazard-strip"></div>
+                    </div>
+                    <div class="map-body">
+                        <canvas id="terrain-canvas" width="640" height="440"></canvas>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        Recent Activity
+                        <button class="btn-tab-jump" onclick="switchTab('logs')">View All →</button>
+                    </div>
+                    <div class="card-body" style="padding:6px 10px;">
+                        <div id="mini-log-container" class="mini-log">
+                            <p class="placeholder">Activity appears here</p>
+                        </div>
+                    </div>
+                </div>
+
+            </main>
+
+            <!-- RIGHT: Live Sensor Readings -->
+            <aside class="dash-right">
+
+                <div class="card sensor-panel">
+                    <div class="card-header">
+                        Live Sensors
+                        <span id="live-badge" class="live-badge">LIVE</span>
+                    </div>
+                    <div class="sensor-panel-body">
+
+                        <div class="sensor-group-label">Atmospheric</div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">🌡</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Temperature</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-temp">--</span>
+                                    <span class="slp-unit">°C</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-temp"></div>
+                        </div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">💧</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Humidity</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-humidity">--</span>
+                                    <span class="slp-unit">%</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-humidity"></div>
+                        </div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">⏲</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Pressure</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-pressure">--</span>
+                                    <span class="slp-unit">hPa</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-pressure"></div>
+                        </div>
+
+                        <div class="sensor-group-label">Hazard</div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">☢</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Radiation</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-radiation">--</span>
+                                    <span class="slp-unit">µSv/h</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-radiation"></div>
+                        </div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">🌫</div>
+                            <div class="slp-info">
+                                <div class="slp-name">PM2.5 Dust</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-pm25">--</span>
+                                    <span class="slp-unit">µg/m³</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-pm25"></div>
+                        </div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">⚡</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Conductivity</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-conductivity">--</span>
+                                    <span class="slp-unit">mS/cm</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-conductivity"></div>
+                        </div>
+
+                        <div class="sensor-group-label">Air Quality</div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">🔵</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Abs 470 nm</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-abs470">--</span>
+                                    <span class="slp-unit">AU</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-abs470"></div>
+                        </div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">🔴</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Abs 850 nm</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-abs850">--</span>
+                                    <span class="slp-unit">AU</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-abs850"></div>
+                        </div>
+
+                        <div class="slp-row">
+                            <div class="slp-icon">💨</div>
+                            <div class="slp-info">
+                                <div class="slp-name">Scattering</div>
+                                <div class="slp-reading">
+                                    <span class="slp-val" id="sv-scatter">--</span>
+                                    <span class="slp-unit">m⁻¹</span>
+                                </div>
+                            </div>
+                            <div class="slp-status" id="slps-scatter"></div>
+                        </div>
+
+                        <div class="slp-gps">
+                            <span class="gps-label">Seleno</span>
+                            <span id="sv-gps">--</span>
+                        </div>
+                        <div class="slp-ts" id="live-ts">--</div>
+
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Samples Collected</div>
+                    <div class="card-body" style="padding:8px 10px;">
+                        <div id="samples-container" class="samples-list">
+                            <p class="placeholder">No samples yet</p>
+                        </div>
+                    </div>
+                </div>
+
+            </aside>
+
+        </div>
+    </section>
+
+    <!-- ── LOGS TAB ───────────────────────────────── -->
+    <section class="tab-pane" id="tab-logs">
+        <div class="logs-layout">
+
+            <div class="card logs-card">
+                <div class="card-header">
+                    Mission Log
+                    <button class="btn-clear" onclick="clearLog()">Clear</button>
+                </div>
+                <div class="logs-scroll">
+                    <div id="logs-container" class="logs">
+                        <p class="placeholder">Logs appear here during a mission</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="logs-right">
+                <div class="card" style="margin-bottom:8px;">
+                    <div class="card-header">Mission Status</div>
+                    <div class="card-body">
+                        <div id="mission-info-logs"><p class="placeholder">No active mission</p></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">Samples</div>
+                    <div class="card-body" style="padding:8px 10px;">
+                        <div id="samples-container-logs" class="samples-list">
+                            <p class="placeholder">No samples yet</p>
+                        </div>
+                    </div>
+                </div>
+                <button id="view-report-btn" class="btn btn-secondary" style="display:none;margin-top:8px;">
+                    View Full Report
+                </button>
+            </div>
+
+        </div>
+    </section>
+
+    <!-- ── SENSORS TAB ────────────────────────────── -->
+    <section class="tab-pane" id="tab-sensors">
+        <div class="sensors-layout">
+
+            <div class="card">
+                <div class="card-header">Sensor Testing</div>
+                <div class="card-body">
+                    <label>Sensor / Instrument</label>
+                    <select id="sensor-select">
+                        <option value="">-- Select Sensor --</option>
+                        <optgroup label="Robotics Sensors">
+                            <option value="radar">RADAR – Motion Detection</option>
+                            <option value="thermal">THERMAL – Heat Detection</option>
+                            <option value="lidar">LIDAR – 3D Mapping</option>
+                            <option value="env_probe">ENV PROBE – Temp / Humidity / Pressure / Air Quality / Radiation / EC</option>
+                        </optgroup>
+                        <optgroup label="Scientific Instruments">
+                            <option value="xrd">XRD – Mineral Identification</option>
+                            <option value="xrf">XRF – Elemental Composition</option>
+                            <option value="gpr">GPR – Subsurface Imaging</option>
+                            <option value="ph">pH PROBE – Regolith Acidity</option>
+                            <option value="soil_core">SOIL CORE – 0–15 cm Sampler</option>
+                            <option value="gas">GAS SYRINGE – Atmospheric / Soil Gas</option>
+                        </optgroup>
+                    </select>
+                    <div id="sensor-capabilities" class="sensor-capabilities">
+                        <p class="placeholder">Select a sensor above</p>
+                    </div>
+                    <button id="run-test-btn" class="btn btn-run" style="display:none;">Run Selected Test</button>
+                </div>
+            </div>
+
+            <div class="card" id="sensor-results-card">
+                <div class="card-header">Analysis Results</div>
+                <div class="card-body" id="sensor-results-body">
+                    <p class="placeholder">Run a test to see results here</p>
+                </div>
+            </div>
+
+        </div>
+    </section>
+
+</div>
+
+<!-- Report Modal -->
+<div id="report-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>Mission Report</h2>
+        <div id="report-content"></div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
