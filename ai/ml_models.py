@@ -58,8 +58,12 @@ class RockTypeClassifier:
 
         return np.vstack(features)
 
-    def predict(self, sample_features: np.ndarray) -> Tuple[str, float]:
+    def predict(self, sample_features) -> Tuple[str, float]:
         """Predict rock type and confidence."""
+        # Convert to numpy array if needed
+        if not isinstance(sample_features, np.ndarray):
+            sample_features = np.array(sample_features)
+
         if sample_features.ndim == 1:
             sample_features = sample_features.reshape(1, -1)
 
