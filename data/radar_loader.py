@@ -17,10 +17,10 @@ class RadarDatasetLoader:
 
         try:
             df = pd.read_csv(filepath)
-            print(f"✓ Loaded {len(df)} radar observations")
+            print(f"[OK] Loaded {len(df)} radar observations")
             return df
         except FileNotFoundError:
-            print(f"✗ File not found: {filepath}")
+            print(f"[ERROR] File not found: {filepath}")
             return None
 
     @staticmethod
