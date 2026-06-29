@@ -1,6 +1,6 @@
 # AI Lab Robot
 
-A robotic arm control system combining LLM planning, computer vision, and MuJoCo simulation.
+A robotic control system combining LLM planning, computer vision, and MuJoCo simulation.
 
 ## Features
 
@@ -133,9 +133,3 @@ Create new XML files in `scenes/` directory following MuJoCo XML format.
 
 ## Future Enhancements
 
-- [ ] Real robot arm integration (UR, FANUC, etc.)
-- [ ] Reinforcement learning policy training
-- [ ] Multi-task learning
-- [ ] Real-time motion planning (RRT, TRAC-IK)
-- [ ] Advanced vision (3D reconstruction, instance segmentation)
-- [ ] Sim-to-real transfer
