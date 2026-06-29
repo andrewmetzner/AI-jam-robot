@@ -34,12 +34,12 @@ def clear_screen():
 def print_banner():
     """Print welcome banner."""
     print("""
-╔════════════════════════════════════════════════════════════════════════════╗
-║                                                                            ║
-║                    AUTONOMOUS ROVER MISSION CONTROL                        ║
-║                       2040s Lunar Research Station                         ║
-║                                                                            ║
-╚════════════════════════════════════════════════════════════════════════════╝
++============================================================================+
+|                                                                            |
+|                    AUTONOMOUS ROVER MISSION CONTROL                        |
+|                       2040s Lunar Research Station                         |
+|                                                                            |
++============================================================================+
     """)
 
 
@@ -257,7 +257,7 @@ def run_health_demo():
 
     print("Alerts:")
     for alert in h_alerts + s_alerts:
-        print(f"  ⚠ {alert}")
+        print(f"  WARNING: {alert}")
 
     input("\nPress ENTER to continue...")
 
@@ -359,7 +359,7 @@ class MissionControl:
 
         for location_idx in range(num_locations):
             if not self.rover.is_operational():
-                print(f"⚠️  Mission halted: Low battery ({self.rover.battery:.1f}%)")
+                print(f"WARNING:️  Mission halted: Low battery ({self.rover.battery:.1f}%)")
                 break
 
             print(f"\n📍 Exploring Location {location_idx + 1}/{num_locations}")
@@ -502,7 +502,7 @@ def main():
             llm_client = Anthropic()
             print("✓ LLM integration enabled (Claude)\n")
         except ImportError:
-            print("⚠️  Anthropic SDK not available. Running without LLM.\n")
+            print("WARNING:️  Anthropic SDK not available. Running without LLM.\n")
 
     mission = MissionControl(llm_client=llm_client)
     num_locations = dataset.get("num_locations", 5)
