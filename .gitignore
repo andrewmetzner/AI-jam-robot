@@ -32,12 +32,12 @@ env/
 *.swo
 *~
 
-# Data and models
-datasets/
-models/*.pth
-models/*.pt
-*.pkl
-*.h5
+# # Data and models
+# datasets/
+# models/*.pth
+# models/*.pt
+# *.pkl
+# *.h5
 
 # Logs
 *.log
