@@ -1,0 +1,75 @@
+<?xml version="1.0" ?>
+<mujoco model="lab_scene">
+  <compiler angle="radian" meshdir="meshes"/>
+
+  <default>
+    <joint armature="0.1" damping="0.1" limited="true"/>
+    <geom friction="1 0.1 0.1" margin="0.001"/>
+  </default>
+
+  <option timestep="0.002"/>
+
+  <worldbody>
+    <!-- Floor -->
+    <geom conaffinity="1" contype="1" name="floor" pos="0 0 0" size="1 1 0.1" type="plane" rgba="0.7 0.7 0.7 1"/>
+
+    <!-- Table -->
+    <body name="table" pos="0.5 0.5 0">
+      <geom pos="0 0 0.75" size="0.5 0.5 0.05" type="box" rgba="0.8 0.6 0.4 1"/>
+      <geom pos="-0.4 -0.4 0.375" size="0.05 0.05 0.375" type="box" rgba="0.8 0.6 0.4 1"/>
+      <geom pos="0.4 -0.4 0.375" size="0.05 0.05 0.375" type="box" rgba="0.8 0.6 0.4 1"/>
+      <geom pos="-0.4 0.4 0.375" size="0.05 0.05 0.375" type="box" rgba="0.8 0.6 0.4 1"/>
+      <geom pos="0.4 0.4 0.375" size="0.05 0.05 0.375" type="box" rgba="0.8 0.6 0.4 1"/>
+    </body>
+
+    <!-- Robotic Arm -->
+    <body name="arm_base" pos="0 0 0.8">
+      <inertial mass="5" pos="0 0 0" fullinertia="5 5 5 0 0 0"/>
+      <geom pos="0 0 0" size="0.1 0.1 0.1" type="box" rgba="0.2 0.2 0.2 1"/>
+
+      <!-- Link 1 -->
+      <joint name="shoulder_pan" axis="0 0 1" pos="0 0 0" range="-3.14159 3.14159" type="hinge"/>
+      <body name="link1" pos="0 0 0.2">
+        <inertial mass="2" pos="0 0 0.1" fullinertia="0.2 0.2 0.2 0 0 0"/>
+        <geom pos="0 0 0.1" size="0.05 0.05 0.1" type="box" rgba="0.4 0.4 0.4 1"/>
+
+        <!-- Link 2 -->
+        <joint name="shoulder_lift" axis="0 1 0" pos="0 0 0" range="-1.5708 1.5708" type="hinge"/>
+        <body name="link2" pos="0 0 0.2">
+          <inertial mass="2" pos="0 0 0.1" fullinertia="0.2 0.2 0.2 0 0 0"/>
+          <geom pos="0 0 0.1" size="0.05 0.05 0.1" type="box" rgba="0.4 0.4 0.4 1"/>
+
+          <!-- Link 3 -->
+          <joint name="elbow" axis="0 1 0" pos="0 0 0" range="-1.5708 1.5708" type="hinge"/>
+          <body name="link3" pos="0 0 0.2">
+            <inertial mass="1.5" pos="0 0 0.1" fullinertia="0.15 0.15 0.15 0 0 0"/>
+            <geom pos="0 0 0.1" size="0.04 0.04 0.1" type="box" rgba="0.5 0.5 0.5 1"/>
+
+            <!-- Wrist -->
+            <joint name="wrist" axis="0 1 0" pos="0 0 0" range="-1.5708 1.5708" type="hinge"/>
+            <body name="end_effector" pos="0 0 0.15">
+              <inertial mass="0.5" pos="0 0 0" fullinertia="0.01 0.01 0.01 0 0 0"/>
+              <geom pos="0 0 0" size="0.03 0.03 0.05" type="box" rgba="0.2 0.8 0.2 1"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Object on table -->
+    <body name="object1" pos="0.5 0.6 0.85">
+      <inertial mass="0.2" pos="0 0 0" fullinertia="0.001 0.001 0.001 0 0 0"/>
+      <geom pos="0 0 0" size="0.05 0.05 0.05" type="box" rgba="1 0 0 1"/>
+      <joint name="obj1_x" axis="1 0 0" pos="0 0 0" type="slide" range="-1 1"/>
+      <joint name="obj1_y" axis="0 1 0" pos="0 0 0" type="slide" range="-1 1"/>
+      <joint name="obj1_z" axis="0 0 1" pos="0 0 0" type="slide" range="0 1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor ctrllimited="true" ctrlrange="-1 1" joint="shoulder_pan" name="shoulder_pan_motor"/>
+    <motor ctrllimited="true" ctrlrange="-1 1" joint="shoulder_lift" name="shoulder_lift_motor"/>
+    <motor ctrllimited="true" ctrlrange="-1 1" joint="elbow" name="elbow_motor"/>
+    <motor ctrllimited="true" ctrlrange="-1 1" joint="wrist" name="wrist_motor"/>
+  </actuator>
+</mujoco>
