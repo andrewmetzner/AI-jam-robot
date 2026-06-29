@@ -3,7 +3,7 @@
 from typing import Dict, List, Optional
 
 
-class LunarScientist:
+class Scientist:
     def __init__(self, llm_client=None, model: str = "claude-opus"):
         """Initialize autonomous scientist."""
         self.llm_client = llm_client

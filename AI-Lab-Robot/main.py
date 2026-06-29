@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-LunaMind: Autonomous AI Scientist for Lunar Exploration
+Autonomous Rover AI System
 
 Orchestrates multimodal sensor fusion, computer vision, LLM reasoning,
-and autonomous navigation to explore lunar terrain and identify
+and autonomous navigation to explore terrain and identify
 scientifically valuable samples.
 """
 
@@ -11,7 +11,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 
-from rover.rover import LunaMindRover
+from rover.rover import Rover
 from sensors.camera import Camera
 from sensors.depth import DepthSensor
 from sensors.thermal import ThermalSensor
@@ -19,7 +19,7 @@ from sensors.spectral import SpectralAnalyzer
 from ai.vision.rock_detector import RockDetector
 from ai.vision.classifier import RockClassifier
 from ai.fusion.sensor_fusion import SensorFusion
-from ai.reasoning.scientist import LunarScientist
+from ai.reasoning.scientist import Scientist
 from ai.planning.route_planner import RoutePlanner
 
 
@@ -27,7 +27,7 @@ class MissionControl:
     def __init__(self, llm_client=None, model: str = "claude-opus"):
         """Initialize mission control system."""
         # Rover systems
-        self.rover = LunaMindRover()
+        self.rover = Rover()
 
         # Sensors
         self.camera = Camera()
@@ -39,7 +39,7 @@ class MissionControl:
         self.rock_detector = RockDetector()
         self.rock_classifier = RockClassifier()
         self.sensor_fusion = SensorFusion()
-        self.scientist = LunarScientist(llm_client=llm_client, model=model)
+        self.scientist = Scientist(llm_client=llm_client, model=model)
         self.route_planner = RoutePlanner()
 
         # Mission state
@@ -58,7 +58,7 @@ class MissionControl:
         Sense → Reason → Decide → Move → Explain
         """
         print(f"\n{'='*60}")
-        print("LUNAMIND EXPLORATION MISSION INITIATED")
+        print("AUTONOMOUS EXPLORATION MISSION INITIATED")
         print(f"{'='*60}\n")
 
         samples_found = []
@@ -154,7 +154,7 @@ class MissionControl:
     def _generate_report(self, samples: list):
         """Generate mission report with sample rankings."""
         print(f"\n{'='*60}")
-        print("LUNAMIND SCIENCE REPORT")
+        print("SCIENCE REPORT")
         print(f"{'='*60}\n")
 
         ranked = self.scientist.rank_samples(samples)
@@ -182,7 +182,7 @@ class MissionControl:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LunaMind Autonomous Rover Mission")
+    parser = argparse.ArgumentParser(description="Autonomous Rover Mission Control")
     parser.add_argument(
         "--mission",
         default="explore",

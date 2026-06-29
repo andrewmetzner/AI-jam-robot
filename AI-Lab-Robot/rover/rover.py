@@ -1,12 +1,12 @@
-"""LunaMind rover core controller."""
+"""Rover core controller."""
 
 from typing import Dict, Tuple
 import numpy as np
 
 
-class LunaMindRover:
+class Rover:
     def __init__(self, position: Tuple[float, float] = (0, 0)):
-        """Initialize LunaMind rover."""
+        """Initialize rover."""
         self.position = np.array(position, dtype=np.float32)
         self.orientation = 0.0  # radians
         self.velocity = np.array([0.0, 0.0], dtype=np.float32)

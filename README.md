@@ -1,10 +1,10 @@
-# LunaMind: Autonomous AI Scientist for Lunar Exploration
+# Autonomous Rover AI System
 
-An autonomous rover system that combines multimodal sensor fusion, computer vision, LLM reasoning, and robotic control to explore unknown lunar terrain and produce scientific reports.
+An autonomous rover system that combines multimodal sensor fusion, computer vision, LLM reasoning, and robotic control to explore unknown terrain and produce scientific reports.
 
-## Vision
+## Overview
 
-**LunaMind** demonstrates the complete autonomous science pipeline:
+This system demonstrates the complete autonomous science pipeline:
 
 ```
 Sense → Reason → Decide → Move → Explain
@@ -31,7 +31,7 @@ The rover:
 ## Project Structure
 
 ```
-LunaMind/
+AI-Lab-Robot/
 ├── main.py                  # Rover mission entry point
 ├── rover/
 │   ├── __init__.py
