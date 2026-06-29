@@ -52,6 +52,7 @@ class MissionControl:
         terrain_type: str = "simple",
         use_llm: bool = False,
         generate_report: bool = True,
+        dataset: dict = None,
     ):
         """
         Execute autonomous exploration mission.
@@ -62,6 +63,7 @@ class MissionControl:
         print(f"{'='*60}\n")
 
         samples_found = []
+        locations = dataset["locations"] if dataset else None
 
         # Simulate exploring multiple locations
         for location_idx in range(num_locations):
@@ -72,8 +74,11 @@ class MissionControl:
             print(f"\n📍 Exploring Location {location_idx + 1}/{num_locations}")
             print("-" * 40)
 
+            # Get location data from dataset if available
+            location_data = locations[location_idx] if locations and location_idx < len(locations) else None
+
             # 1. SENSE: Capture multimodal sensor data
-            sensor_data = self._sense(location_idx)
+            sensor_data = self._sense(location_idx, location_data)
             print(f"✓ Sensors active: Camera, Depth, Thermal, Spectral")
 
             # 2. PROCESS: Fuse sensor data
@@ -104,19 +109,27 @@ class MissionControl:
         print("MISSION COMPLETE")
         print(f"{'='*60}\n")
 
-    def _sense(self, location_idx: int) -> dict:
-        """Capture data from all sensors."""
-        rocks = self.rock_detector.detect(np.random.randn(480, 640, 3))
-        spectral = self.spectral_analyzer.analyze({})
-        thermal_anomalies = self.thermal_sensor.detect_anomalies()
+    def _sense(self, location_idx: int, location_data: dict = None) -> dict:
+        """Capture data from all sensors or use dataset."""
+        if location_data:
+            # Use dataset rocks directly
+            rocks = location_data.get("rocks", [])
+            thermal_anomalies = location_data.get("hazards", [])
+            spectral = self.spectral_analyzer.analyze({})
+        else:
+            # Simulate sensors
+            rocks = self.rock_detector.detect(np.random.randn(480, 640, 3))
+            spectral = self.spectral_analyzer.analyze({})
+            thermal_anomalies = self.thermal_sensor.detect_anomalies()
 
         return {
             "location": location_idx,
-            "rocks": self.rock_detector.get_detections(),
+            "rocks": rocks,
             "spectral": spectral,
             "thermal_anomalies": thermal_anomalies,
             "depth": {"value": 5.0 + np.random.randn() * 1.0},
             "timestamp": location_idx,
+            "location_data": location_data,
         }
 
     def _analyze_rocks(self, rocks: list, use_llm: bool = False) -> list:
@@ -190,13 +203,18 @@ def main():
         help="Mission type",
     )
     parser.add_argument(
+        "--dataset",
+        default="simple",
+        help="Mock dataset to use (simple, complex, crater, hazard, drill)",
+    )
+    parser.add_argument(
         "--terrain",
         default="simple",
         choices=["simple", "complex", "hazard", "realistic"],
-        help="Terrain type",
+        help="Terrain type (legacy, use --dataset instead)",
     )
     parser.add_argument(
-        "--locations", type=int, default=5, help="Number of exploration locations"
+        "--locations", type=int, default=None, help="Number of exploration locations (overrides dataset)"
     )
     parser.add_argument(
         "--use-llm", action="store_true", help="Enable LLM-based reasoning"
@@ -208,17 +226,38 @@ def main():
         help="Generate mission report",
     )
     parser.add_argument(
+        "--list-datasets", action="store_true", help="List available datasets and exit"
+    )
+    parser.add_argument(
         "--model", default="claude-opus", help="LLM model to use"
     )
 
     args = parser.parse_args()
+
+    # List datasets and exit
+    if args.list_datasets:
+        from data.datasets import DatasetLoader
+        print("\nAvailable Datasets:\n")
+        for name, desc in DatasetLoader.get_dataset_info().items():
+            print(f"  {name:12} - {desc}")
+        print()
+        return
+
+    # Load dataset
+    from data.datasets import DatasetLoader
+    try:
+        dataset = DatasetLoader.load_dataset(args.dataset)
+        print(f"✓ Loaded dataset: {dataset['name']}\n")
+    except ValueError as e:
+        print(f"✗ Error: {e}")
+        print(f"  Use --list-datasets to see available options\n")
+        return
 
     # Initialize mission control
     llm_client = None
     if args.use_llm:
         try:
             from anthropic import Anthropic
-
             llm_client = Anthropic()
             print("✓ LLM integration enabled (Claude)\n")
         except ImportError:
@@ -226,14 +265,15 @@ def main():
 
     mission = MissionControl(llm_client=llm_client, model=args.model)
 
-    # Execute mission
-    if args.mission == "explore":
-        mission.execute_exploration_mission(
-            num_locations=args.locations,
-            terrain_type=args.terrain,
-            use_llm=args.use_llm,
-            generate_report=args.generate_report,
-        )
+    # Execute mission with dataset
+    num_locations = args.locations or dataset.get("num_locations", 5)
+    mission.execute_exploration_mission(
+        num_locations=num_locations,
+        terrain_type=args.terrain,
+        use_llm=args.use_llm,
+        generate_report=args.generate_report,
+        dataset=dataset,
+    )
 
 
 if __name__ == "__main__":
