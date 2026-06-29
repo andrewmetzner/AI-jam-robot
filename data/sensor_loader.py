@@ -1,5 +1,5 @@
 """
-Load and parse sensor data from CSV files
+Load and parse sensor data from CSV and Excel files.
 """
 
 import pandas as pd
@@ -53,9 +53,14 @@ class SensorDataLoader:
             'uses': ['Create 3D maps', 'Avoid obstacles', 'Plan routes', 'Build environment models'],
         },
         'env_probe': {
-            'file': 'mock_env_probe_1hour.csv',
+            'files': [
+                'Mock_Lunar_Environment_Dataset_2026-06-29_1200.xlsx',
+                'lunar_env_probe_1hour.csv',
+                'mock_env_probe_1hour.csv',
+            ],
+            'sheet_name': 'Lunar_Environment',
             'name': 'Environmental Probe Pack',
-            'description': 'Temperature, humidity, pressure, air quality, radiation, and EC sensors',
+            'description': 'Excel-backed lunar environment readings with temperature, pressure, radiation, and derived dust/EC signals',
             'capabilities': [
                 'Atmospheric Profiling (Temp/Humidity/Pressure)',
                 'Air Quality Analysis (Absorbance & Scattering)',
@@ -118,17 +123,20 @@ class SensorDataLoader:
             'uses': ['Assess habitability', 'Detect chemical weathering', 'Evaluate biosignature potential', 'Map acidic zones'],
         },
         'soil_core': {
-            'file': 'mock_soil_core_1hour.csv',
+            'files': [
+                'FINAL_mock_lunar_soil_core_sampler_0_15cm_observations_1hour.xlsx',
+                'final_soil_core_1hour.csv',
+            ],
             'name': 'Soil Core Sampler (0–15 cm)',
-            'description': 'Physical and chemical properties of shallow regolith',
+            'description': 'Final lunar soil-core dataset with drillability, density, moisture, and volatile indicators',
             'capabilities': [
                 'Bulk Density Measurement',
                 'Porosity & Moisture Content',
-                'Organic Carbon Estimation',
-                'Texture & Compaction Analysis',
+                'Volatile Detection',
+                'Texture & Drillability Analysis',
                 'Stratigraphic Layering (0–15 cm)',
             ],
-            'uses': ['Characterize regolith structure', 'Assess trafficability', 'Detect organic material', 'Sample for lab analysis'],
+            'uses': ['Characterize regolith structure', 'Assess trafficability & drillability', 'Detect trapped volatiles', 'Sample for lab analysis'],
         },
         'gas': {
             'file': 'mock_gas_syringe_1hour.csv',
@@ -205,8 +213,8 @@ class SensorDataLoader:
         'soil_core': [
             ('bulk_density_measurement',   'Bulk Density Measurement'),
             ('porosity_moisture_content',  'Porosity & Moisture Content'),
-            ('organic_carbon_estimation',  'Organic Carbon Estimation'),
-            ('texture_compaction_analysis','Texture & Compaction Analysis'),
+            ('volatile_detection',         'Volatile Detection'),
+            ('texture_compaction_analysis','Texture & Drillability Analysis'),
             ('stratigraphic_layering',     'Stratigraphic Layering (0–15 cm)'),
         ],
         'gas': [
@@ -219,15 +227,146 @@ class SensorDataLoader:
     }
 
     @staticmethod
+    def _read_tabular_file(path: Path, sheet_name=0):
+        """Read a CSV or Excel file based on the file suffix."""
+        suffix = path.suffix.lower()
+        if suffix in {'.xlsx', '.xls', '.xlsm'}:
+            return pd.read_excel(path, sheet_name=sheet_name)
+        return pd.read_csv(path)
+
+    @staticmethod
+    def _load_first_available(files, sheet_name=0):
+        """Load the first readable file from a candidate list."""
+        for name in files:
+            path = SensorDataLoader.DATA_DIR / name
+            if not path.exists():
+                continue
+            try:
+                return SensorDataLoader._read_tabular_file(path, sheet_name=sheet_name)
+            except (PermissionError, OSError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _normalize_env_probe(df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize lunar environment columns to the dashboard schema."""
+        if df is None or df.empty:
+            return df
+
+        def _series_or_default(column_name, default=0.0):
+            if column_name in df.columns:
+                return pd.to_numeric(df[column_name], errors='coerce')
+            return pd.Series(default, index=df.index, dtype='float64')
+
+        rename = {
+            'Timestamp (UTC)': 'timestamp',
+            'Lunar Time': 'lunar_time',
+            'Ambient Temp (°C)': 'temp_c',
+            'Regolith Temp 5cm (°C)': 'regolith_5cm_c',
+            'Regolith Temp 50cm (°C)': 'regolith_50cm_c',
+            'Rover Internal Temp (°C)': 'rover_internal_temp_c',
+            'Solar Illumination (%)': 'solar_pct',
+            'Humidity (%)': 'humidity_pct',
+            'Pressure (Pa)': 'pressure_pa',
+            'Radiation (µSv/h)': 'cosmic_rad_usv_h',
+            'Location': 'location',
+        }
+        df = df.rename(columns=rename).copy()
+        if 'temp_c' not in df.columns:
+            fallback_rename = {}
+            for column in df.columns:
+                column_lower = str(column).strip().lower()
+                if column_lower.startswith('timestamp'):
+                    fallback_rename[column] = 'timestamp'
+                elif column_lower.startswith('lunar time'):
+                    fallback_rename[column] = 'lunar_time'
+                elif 'ambient temp' in column_lower:
+                    fallback_rename[column] = 'temp_c'
+                elif 'regolith temp 5cm' in column_lower:
+                    fallback_rename[column] = 'regolith_5cm_c'
+                elif 'regolith temp 50cm' in column_lower:
+                    fallback_rename[column] = 'regolith_50cm_c'
+                elif 'rover internal temp' in column_lower:
+                    fallback_rename[column] = 'rover_internal_temp_c'
+                elif 'solar illumination' in column_lower:
+                    fallback_rename[column] = 'solar_pct'
+                elif column_lower.startswith('humidity'):
+                    fallback_rename[column] = 'humidity_pct'
+                elif column_lower.startswith('pressure'):
+                    fallback_rename[column] = 'pressure_pa'
+                elif column_lower.startswith('radiation'):
+                    fallback_rename[column] = 'cosmic_rad_usv_h'
+                elif column_lower.startswith('location'):
+                    fallback_rename[column] = 'location'
+            if fallback_rename:
+                df = df.rename(columns=fallback_rename).copy()
+
+        if 'pressure_hpa' not in df.columns:
+            if 'pressure_pa' in df.columns:
+                df['pressure_hpa'] = pd.to_numeric(df['pressure_pa'], errors='coerce') / 100.0
+            else:
+                df['pressure_hpa'] = 0.0
+
+        if 'abs_470nm' not in df.columns:
+            solar = _series_or_default('solar_pct').fillna(0)
+            rad = _series_or_default('cosmic_rad_usv_h').fillna(0)
+            df['abs_470nm'] = np.clip((solar / 100.0) * 0.004 + (rad / 50000.0), 0.0, 0.01)
+
+        if 'abs_850nm' not in df.columns:
+            df['abs_850nm'] = np.clip(pd.to_numeric(df['abs_470nm'], errors='coerce').fillna(0) * 0.72, 0.0, 0.01)
+
+        if 'scattering_m1' not in df.columns:
+            solar = _series_or_default('solar_pct').fillna(0)
+            df['scattering_m1'] = np.clip(
+                pd.to_numeric(df['abs_470nm'], errors='coerce').fillna(0) * 0.30 +
+                (100.0 - solar).clip(lower=0) * 0.00008,
+                0.0,
+                0.03,
+            )
+
+        if 'pm25_ug_m3' not in df.columns:
+            regolith_5 = _series_or_default('regolith_5cm_c').fillna(0)
+            regolith_50 = _series_or_default('regolith_50cm_c').fillna(0)
+            solar = _series_or_default('solar_pct').fillna(0)
+            df['pm25_ug_m3'] = np.clip(
+                np.abs(regolith_5 - regolith_50) * 0.08 + (100.0 - solar).clip(lower=0) * 0.05,
+                0.0,
+                20.0,
+            )
+
+        if 'ec_ms_cm' not in df.columns:
+            df['ec_ms_cm'] = np.clip(0.001 + pd.to_numeric(df['pm25_ug_m3'], errors='coerce').fillna(0) * 0.0006, 0.0, 0.05)
+
+        if 'gps_lat' not in df.columns:
+            df['gps_lat'] = -53.0
+        if 'gps_lon' not in df.columns:
+            df['gps_lon'] = -169.0
+
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce').astype('string').fillna(df['timestamp'].astype(str))
+
+        numeric_cols = [
+            'temp_c', 'humidity_pct', 'pressure_pa', 'pressure_hpa', 'abs_470nm',
+            'abs_850nm', 'scattering_m1', 'pm25_ug_m3', 'cosmic_rad_usv_h',
+            'ec_ms_cm', 'gps_lat', 'gps_lon',
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        return df
+
+    @staticmethod
     def _load(sensor_type):
         """Generic CSV loader — returns raw DataFrame or None."""
         spec = SensorDataLoader.SENSOR_SPECS.get(sensor_type)
         if not spec:
             return None
-        path = SensorDataLoader.DATA_DIR / spec['file']
-        if not path.exists():
-            return None
-        return pd.read_csv(path)
+        files = spec.get('files')
+        if files is None:
+            file_value = spec.get('file')
+            files = [file_value] if isinstance(file_value, str) else list(file_value or [])
+        return SensorDataLoader._load_first_available(files, sheet_name=spec.get('sheet_name', 0))
 
     @staticmethod
     def load_radar_data():
@@ -560,6 +699,7 @@ class SensorDataLoader:
         df = SensorDataLoader._load('env_probe')
         if df is None:
             return None
+        df = SensorDataLoader._normalize_env_probe(df)
         return {
             'sensor': 'env_probe',
             'name': SensorDataLoader.SENSOR_SPECS['env_probe']['name'],
@@ -570,8 +710,10 @@ class SensorDataLoader:
                 'humidity_range': {'min': float(df['humidity_pct'].min()), 'max': float(df['humidity_pct'].max())},
                 'pressure_range': {'min': float(df['pressure_hpa'].min()), 'max': float(df['pressure_hpa'].max())},
                 'radiation_mean': float(df['cosmic_rad_usv_h'].mean()),
+                'radiation_max': float(df['cosmic_rad_usv_h'].max()),
                 'ec_mean': float(df['ec_ms_cm'].mean()),
                 'pm25_mean': float(df['pm25_ug_m3'].mean()),
+                'solar_mean': float(pd.to_numeric(df['solar_pct'], errors='coerce').fillna(0).mean()) if 'solar_pct' in df.columns else 0.0,
             }
         }
 
@@ -653,12 +795,16 @@ class SensorDataLoader:
             'sensor': 'soil_core', 'name': SensorDataLoader.SENSOR_SPECS['soil_core']['name'],
             'data': df,
             'summary': {
-                'total_cores': len(df),
+                'total_samples': len(df),
+                'cores': int(df['core_id'].nunique()),
                 'avg_bulk_density': float(df['bulk_density_g_cm3'].mean()),
-                'avg_porosity': float(df['porosity_pct'].mean()),
-                'avg_moisture': float(df['moisture_content_pct'].mean()),
-                'texture_types': df['texture_class'].value_counts().to_dict(),
-                'avg_retrieved_pct': float(df['retrieved_pct'].mean()),
+                'avg_moisture': float(df['moisture_percent'].mean()),
+                'quality_types': df['sample_quality'].value_counts().to_dict(),
+                'volatile_ratio': float((df['volatile_flag'].astype(str).str.lower() != 'none').mean()),
+                'good_quality_ratio': float((df['sample_quality'].astype(str).str.lower() == 'good').mean()),
+                'avg_cohesion': float(df['cohesion_kpa'].mean()),
+                'avg_rock_fragment_pct': float(df['rock_fragment_percent'].mean()),
+                'avg_confidence': float(df['confidence'].mean()),
             }
         }
 
@@ -926,50 +1072,62 @@ class SensorDataLoader:
 
     @staticmethod
     def _analyze_soil_core(df, analysis_type):
+        # FINAL lunar soil-core schema: depth_top_cm, depth_bottom_cm, penetration_force_n,
+        # drill_current_a, rotation_speed_rpm, regolith_temp_c, bulk_density_g_cm3,
+        # sample_mass_g, grain_size_median_um, cohesion_kpa, moisture_percent,
+        # volatile_flag, rock_fragment_percent, sample_quality, confidence
         if analysis_type == 'bulk_density_measurement':
             hi = df[df['bulk_density_g_cm3'] > 1.7]
             return {
                 'analysis': 'Bulk Density Measurement',
-                'avg_bulk_density': float(df['bulk_density_g_cm3'].mean()),
-                'max_bulk_density': float(df['bulk_density_g_cm3'].max()),
-                'compact_zones': len(hi),
-                'result': f"Avg {df['bulk_density_g_cm3'].mean():.3f} g/cm3; {len(hi)} compacted zones",
+                'avg_bulk_density_g_cm3': round(float(df['bulk_density_g_cm3'].mean()), 3),
+                'max_bulk_density_g_cm3': round(float(df['bulk_density_g_cm3'].max()), 3),
+                'min_bulk_density_g_cm3': round(float(df['bulk_density_g_cm3'].min()), 3),
+                'compacted_samples': int(len(hi)),
+                'result': f"Avg {df['bulk_density_g_cm3'].mean():.3f} g/cm³; {len(hi)} compacted samples (>1.7)",
             }
         elif analysis_type == 'porosity_moisture_content':
+            # Lunar regolith grain density ~2.9 g/cm³; porosity = 1 - bulk/grain
+            porosity = (1 - df['bulk_density_g_cm3'] / 2.9) * 100
             return {
                 'analysis': 'Porosity & Moisture Content',
-                'avg_porosity_pct': float(df['porosity_pct'].mean()),
-                'avg_moisture_pct': float(df['moisture_content_pct'].mean()),
-                'max_moisture_pct': float(df['moisture_content_pct'].max()),
-                'result': f"Porosity {df['porosity_pct'].mean():.1f}%; moisture {df['moisture_content_pct'].mean():.1f}%",
+                'avg_porosity_pct': round(float(porosity.mean()), 1),
+                'avg_moisture_pct': round(float(df['moisture_percent'].mean()), 3),
+                'max_moisture_pct': round(float(df['moisture_percent'].max()), 3),
+                'result': f"Porosity {porosity.mean():.1f}% (derived); moisture {df['moisture_percent'].mean():.2f}%",
             }
-        elif analysis_type == 'organic_carbon_estimation':
-            hi = df[df['organic_carbon_pct'] > 0.4]
+        elif analysis_type == 'volatile_detection':
+            vol = df[df['volatile_flag'] != 'none']
+            damp = df[df['moisture_percent'] > df['moisture_percent'].quantile(0.9)]
             return {
-                'analysis': 'Organic Carbon Estimation',
-                'avg_oc_pct': float(df['organic_carbon_pct'].mean()),
-                'max_oc_pct': float(df['organic_carbon_pct'].max()),
-                'high_oc_cores': len(hi),
-                'avg_total_nitrogen': float(df['total_nitrogen_pct'].mean()),
-                'result': f"Avg OC {df['organic_carbon_pct'].mean():.3f}%; {len(hi)} cores with elevated organics",
+                'analysis': 'Volatile Detection',
+                'volatile_bearing_samples': int(len(vol)),
+                'volatile_flag_breakdown': df['volatile_flag'].value_counts().to_dict(),
+                'avg_moisture_pct': round(float(df['moisture_percent'].mean()), 3),
+                'high_moisture_samples': int(len(damp)),
+                'result': f"{len(vol)} samples flagged for trapped volatiles; {len(damp)} high-moisture pockets",
             }
         elif analysis_type == 'texture_compaction_analysis':
             return {
-                'analysis': 'Texture & Compaction Analysis',
-                'texture_distribution': df['texture_class'].value_counts().to_dict(),
-                'avg_compaction_n_cm2': float(df['compaction_n_cm2'].mean()),
-                'max_compaction': float(df['compaction_n_cm2'].max()),
-                'result': f"Dominant texture: {df['texture_class'].mode()[0]}; avg compaction {df['compaction_n_cm2'].mean():.1f} N/cm2",
+                'analysis': 'Texture & Drillability Analysis',
+                'avg_grain_size_um': round(float(df['grain_size_median_um'].mean()), 1),
+                'avg_cohesion_kpa': round(float(df['cohesion_kpa'].mean()), 3),
+                'avg_penetration_force_n': round(float(df['penetration_force_n'].mean()), 1),
+                'avg_drill_current_a': round(float(df['drill_current_a'].mean()), 3),
+                'avg_rock_fragment_pct': round(float(df['rock_fragment_percent'].mean()), 1),
+                'sample_quality': df['sample_quality'].value_counts().to_dict(),
+                'result': f"Median grain {df['grain_size_median_um'].mean():.0f} µm; avg drill force {df['penetration_force_n'].mean():.0f} N",
             }
         elif analysis_type == 'stratigraphic_layering':
-            by_depth = {f"{k[0]}-{k[1]}cm": round(v, 3)
-                        for k, v in df.groupby(['depth_top_cm','depth_bot_cm'])['bulk_density_g_cm3'].mean().items()}
+            by_depth = {f"{int(k[0])}-{int(k[1])}cm": round(float(v), 3)
+                        for k, v in df.groupby(['depth_top_cm', 'depth_bottom_cm'])['bulk_density_g_cm3'].mean().items()}
             return {
                 'analysis': 'Stratigraphic Layering (0-15 cm)',
-                'layers_sampled': len(df),
-                'avg_retrieved_pct': float(df['retrieved_pct'].mean()),
+                'samples': int(len(df)),
+                'cores': int(df['core_id'].nunique()),
+                'depth_intervals': len(by_depth),
                 'density_by_layer': by_depth,
-                'result': f"{len(df)} cores; avg {df['retrieved_pct'].mean():.0f}% recovery; {len(by_depth)} depth intervals",
+                'result': f"{df['core_id'].nunique()} cores, {len(df)} samples across {len(by_depth)} depth intervals",
             }
         return {'error': f'Unknown analysis: {analysis_type}'}
 

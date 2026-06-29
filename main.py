@@ -259,6 +259,32 @@ def run_health_demo():
     for alert in h_alerts + s_alerts:
         print(f"  WARNING: {alert}")
 
+    print("\nScenario 3: SPACE CONDITIONS HEART RATE PREDICTION")
+    print("-" * 70 + "\n")
+
+    space_prediction = monitor.predict_heart_rate_from_conditions(
+        baseline_heart_rate=72,
+        conditions={
+            "radiation_usv_h": 145.0,
+            "temperature_c": -175.0,
+            "suit_pressure": 3.6,
+            "oxygen_saturation": 92,
+            "co2_level": 4.8,
+            "dust_level": 7.5,
+            "metabolic_rate": 380,
+            "fatigue_level": 0.78,
+            "work_duration": 3.8,
+        },
+    )
+
+    print(f"Predicted HR: {space_prediction['predicted_heart_rate']} bpm")
+    print(f"Status: {space_prediction['heart_rate_status'].upper()}")
+    print(f"Recommendation: {space_prediction['recommendation']}")
+    if space_prediction["warning_signs"]:
+        print("Warning Signs:")
+        for warning in space_prediction["warning_signs"]:
+            print(f"  - {warning}")
+
     input("\nPress ENTER to continue...")
 
 

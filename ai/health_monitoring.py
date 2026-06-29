@@ -90,6 +90,20 @@ class AstronautBiometrics:
     fatigue_level: float  # 0-1 (0=fresh, 1=exhausted)
 
 
+@dataclass
+class SpaceConditions:
+    """Environmental conditions used to estimate astronaut cardiovascular load."""
+    radiation_usv_h: float = 0.0
+    temperature_c: float = 0.0
+    suit_pressure: float = 4.3
+    oxygen_saturation: int = 98
+    co2_level: float = 2.8
+    dust_level: float = 0.0
+    metabolic_rate: float = 300.0
+    fatigue_level: float = 0.0
+    work_duration: float = 0.0
+
+
 class AstronautMonitor:
     """Real-time health monitoring for lunar EVA."""
 
@@ -196,6 +210,116 @@ class AstronautMonitor:
                 status = SuitStatus.DEGRADED
 
         return status, alerts
+
+    def predict_heart_rate_from_conditions(
+        self,
+        baseline_heart_rate: int,
+        conditions: Dict[str, float],
+    ) -> Dict[str, any]:
+        """Predict heart rate from the current space environment."""
+        radiation = float(conditions.get("radiation_usv_h", conditions.get("radiation", 0.0)))
+        temperature = float(conditions.get("temperature_c", conditions.get("temp_c", 0.0)))
+        suit_pressure = float(conditions.get("suit_pressure", self.thresholds.suit_pressure_nominal))
+        oxygen_saturation = float(conditions.get("oxygen_saturation", 98))
+        co2_level = float(conditions.get("co2_level", 2.8))
+        dust_level = float(conditions.get("dust_level", conditions.get("pm25_ug_m3", 0.0)))
+        metabolic_rate = float(conditions.get("metabolic_rate", 300.0))
+        fatigue_level = float(conditions.get("fatigue_level", 0.0))
+        work_duration = float(conditions.get("work_duration", 0.0))
+
+        load_bpm = 0.0
+        drivers = []
+
+        radiation_load = max(0.0, radiation - 80.0) * 0.12
+        if radiation_load > 0:
+            drivers.append({"factor": "radiation", "impact_bpm": round(radiation_load, 1)})
+        load_bpm += radiation_load
+
+        thermal_load = max(0.0, abs(temperature - 22.0) - 5.0) * 0.08
+        if thermal_load > 0:
+            drivers.append({"factor": "thermal_stress", "impact_bpm": round(thermal_load, 1)})
+        load_bpm += thermal_load
+
+        pressure_load = max(0.0, self.thresholds.suit_pressure_nominal - suit_pressure) * 14.0
+        if pressure_load > 0:
+            drivers.append({"factor": "suit_pressure", "impact_bpm": round(pressure_load, 1)})
+        load_bpm += pressure_load
+
+        oxygen_load = max(0.0, self.thresholds.oxygen_sat_min - oxygen_saturation) * 1.1
+        if oxygen_load > 0:
+            drivers.append({"factor": "oxygen", "impact_bpm": round(oxygen_load, 1)})
+        load_bpm += oxygen_load
+
+        co2_load = max(0.0, co2_level - self.thresholds.co2_max) * 6.5
+        if co2_load > 0:
+            drivers.append({"factor": "co2", "impact_bpm": round(co2_load, 1)})
+        load_bpm += co2_load
+
+        dust_load = max(0.0, dust_level - self.thresholds.dust_max) * 0.35
+        if dust_load > 0:
+            drivers.append({"factor": "dust", "impact_bpm": round(dust_load, 1)})
+        load_bpm += dust_load
+
+        metabolic_load = max(0.0, metabolic_rate - 300.0) / 18.0
+        if metabolic_load > 0:
+            drivers.append({"factor": "metabolic_rate", "impact_bpm": round(metabolic_load, 1)})
+        load_bpm += metabolic_load
+
+        fatigue_load = fatigue_level * 18.0
+        if fatigue_load > 0:
+            drivers.append({"factor": "fatigue", "impact_bpm": round(fatigue_load, 1)})
+        load_bpm += fatigue_load
+
+        duration_load = work_duration * 1.0
+        if duration_load > 0:
+            drivers.append({"factor": "work_duration", "impact_bpm": round(duration_load, 1)})
+        load_bpm += duration_load
+
+        predicted_heart_rate = max(40, int(round(baseline_heart_rate + load_bpm)))
+
+        if predicted_heart_rate >= self.thresholds.heart_rate_critical:
+            status = HealthStatus.CRITICAL
+        elif predicted_heart_rate > self.thresholds.heart_rate_max:
+            status = HealthStatus.WARNING
+        elif predicted_heart_rate > self.thresholds.heart_rate_min + 15:
+            status = HealthStatus.CAUTION
+        else:
+            status = HealthStatus.NOMINAL
+
+        warning_signs = []
+        if predicted_heart_rate > self.thresholds.heart_rate_max:
+            warning_signs.append("Heart rate above the normal EVA range")
+        if predicted_heart_rate >= self.thresholds.heart_rate_critical:
+            warning_signs.append("Heart rate in the critical zone")
+        if radiation >= 90:
+            warning_signs.append("High radiation can drive stress and rapid pulse")
+        if suit_pressure < self.thresholds.suit_pressure_min:
+            warning_signs.append("Low suit pressure can elevate cardiovascular load")
+        if oxygen_saturation < self.thresholds.oxygen_sat_min:
+            warning_signs.append("Reduced oxygen saturation can trigger tachycardia")
+        if co2_level > self.thresholds.co2_max:
+            warning_signs.append("Elevated CO2 can cause faster breathing and pulse")
+        if fatigue_level > 0.75:
+            warning_signs.append("Fatigue is high enough to affect heart rate stability")
+
+        if status == HealthStatus.CRITICAL:
+            recommendation = "Stop activity and return to shelter immediately."
+        elif status == HealthStatus.WARNING:
+            recommendation = "Reduce workload, hydrate, and monitor closely."
+        elif status == HealthStatus.CAUTION:
+            recommendation = "Schedule a rest break and keep watching the trend."
+        else:
+            recommendation = "Continue with routine monitoring."
+
+        return {
+            "baseline_heart_rate": baseline_heart_rate,
+            "predicted_heart_rate": predicted_heart_rate,
+            "delta_bpm": predicted_heart_rate - baseline_heart_rate,
+            "heart_rate_status": status.value,
+            "warning_signs": warning_signs,
+            "drivers": drivers,
+            "recommendation": recommendation,
+        }
 
     def recommend_action(self, health_status: HealthStatus, suit_status: SuitStatus,
                         biometrics: AstronautBiometrics) -> Dict[str, any]:

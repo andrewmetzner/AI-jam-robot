@@ -3,6 +3,22 @@ const API_BASE = 'http://localhost:5000';
 let socket;
 let activeMissionId = null;
 let missionData = {};
+let moonMapData = null;
+let astronautSafetySnapshot = null;
+let recentAlerts = [];
+let missionTrail = [];
+
+// ── Moon terrain image (revealed by fog-of-war as the rover explores) ──────────
+const MOON_IMG = new Image();
+let moonImgLoaded = false;
+MOON_IMG.onload = () => { moonImgLoaded = true; drawTerrainMap(); };
+MOON_IMG.src = '/static/MoonDEM.png';
+
+// Camera / zoom config for the lunar map
+const MAP_PXPM = 11;        // pixels per metre (higher = more zoomed in)
+const MAP_VISION_M = 9;     // field-of-vision reveal radius in metres
+const MOON_SPAN_X = 170;    // metres the moon image spans horizontally (tiled)
+const MOON_SPAN_Y = 85;     // metres vertically
 
 // Initialize application
 document.addEventListener('DOMContentLoaded', function() {
@@ -10,6 +26,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     initializeWebSocket();
     setupEventListeners();
+    loadMoonMap();
+    fetchAstronautHealth();
     drawTerrainMap();
 });
 
@@ -59,13 +77,41 @@ function initializeWebSocket() {
     socket.on('connected', (data) => {
         console.log(data.data);
         fetchLiveReadings();
+        loadMoonMap();
+        fetchAstronautHealth();
+        fetchRecentAlerts();
     });
 
     socket.on('live_sensor', (data) => {
         updateSensorDisplay(data);
     });
 
+    socket.on('safety_snapshot', (data) => {
+        astronautSafetySnapshot = data;
+        updateAstronautHealth(data);
+    });
+
+    socket.on('safety_alert', (alert) => {
+        if (!alert) return;
+        prependSafetyAlert(alert);
+        const severity = (alert.severity || 'normal').toUpperCase();
+        const title = alert.title || 'Safety alert';
+        addLog(`${severity}: ${title} - ${alert.message || ''}`.trim());
+    });
+
+    socket.on('safety_alerts', (alerts) => {
+        renderSafetyAlerts(alerts || []);
+    });
+
     socket.on('rover_moved', (data) => {
+        applyRoverState(data);
+    });
+
+    socket.on('simulation_reset', (data) => {
+        plannedPath = [];
+        missionTrail = [];
+        autoDriving = false;
+        activeMissionId = null;
         applyRoverState(data);
     });
 }
@@ -141,6 +187,7 @@ async function startMission() {
         document.getElementById('logs-container').innerHTML = '';
         document.getElementById('samples-container').innerHTML = '<p class="placeholder">No samples collected yet</p>';
         document.getElementById('view-report-btn').style.display = 'none';
+        missionTrail = [];
 
         // Highlight active mission
         updateActiveMissionsList();
@@ -213,6 +260,16 @@ function updateMissionStatus(data) {
 
     if (data.sensor_readings && Object.keys(data.sensor_readings).length > 0) {
         updateSensorDisplay(data.sensor_readings);
+    }
+    if (Array.isArray(data.rover_position) && data.rover_position.length >= 2) {
+        const [mx, my] = data.rover_position;
+        const last = missionTrail[missionTrail.length - 1];
+        if (!last || last[0] !== mx || last[1] !== my) {
+            missionTrail.push([mx, my]);
+            if (missionTrail.length > 200) {
+                missionTrail = missionTrail.slice(-200);
+            }
+        }
     }
     drawTerrainMap(data);
 }
@@ -298,107 +355,47 @@ function drawTerrainMap(roverState = null) {
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
     const CX = W / 2, CY = H / 2;
-    const SCALE = 7;  // pixels per metre
+    const SCALE = MAP_PXPM;  // pixels per metre
 
-    const worldToCanvas = (wx, wy) => [CX + wx * SCALE, CY - wy * SCALE];
+    // Camera follows the active rover. A running mission takes priority so the
+    // mission rover stays centered; otherwise follow the manual WASD controller.
+    let camX = 0, camY = 0;
+    if (roverState && roverState.rover_position) { camX = roverState.rover_position[0]; camY = roverState.rover_position[1]; }
+    else if (_roverState && _roverState.x !== undefined) { camX = _roverState.x; camY = _roverState.y; }
 
-    // Background
-    ctx.fillStyle = '#eef2f7';
+    const worldToCanvas = (wx, wy) => [CX + (wx - camX) * SCALE, CY - (wy - camY) * SCALE];
+
+    // Deep-space backdrop (unexplored void)
+    ctx.fillStyle = '#05070d';
     ctx.fillRect(0, 0, W, H);
 
-    // Grid lines
-    ctx.strokeStyle = 'rgba(30,58,95,0.08)';
+    // Moon terrain image, tiled in world space (this is what fog reveals)
+    drawMoonBase(ctx, worldToCanvas, SCALE, camX, camY, W, H);
+
+    // Subtle grid over terrain for scale reference
+    ctx.strokeStyle = 'rgba(120,140,170,0.10)';
     ctx.lineWidth = 1;
     const gridStep = SCALE * 5;  // every 5 m
-    for (let x = CX % gridStep; x < W; x += gridStep) {
+    const [ox] = worldToCanvas(0, 0);
+    for (let x = ((ox % gridStep) + gridStep) % gridStep; x < W; x += gridStep) {
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     }
-    for (let y = CY % gridStep; y < H; y += gridStep) {
+    const [, oy] = worldToCanvas(0, 0);
+    for (let y = ((oy % gridStep) + gridStep) % gridStep; y < H; y += gridStep) {
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     }
 
-    // Axis lines
-    ctx.strokeStyle = 'rgba(30,58,95,0.18)';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(CX, 0); ctx.lineTo(CX, H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, CY); ctx.lineTo(W, CY); ctx.stroke();
+    // NOTE: hazard zones, sample sites and the collection ring are drawn in the
+    // foreground pass (renderMapFeatures) AFTER the fog, so they stay visible
+    // above the moon image and the fog overlay.
 
-    // Hazard zones (from controller state)
-    const zones = (_roverState && _roverState.hazard_zones) || [];
-    const zoneColors = {
-        radiation: { fill: 'rgba(220,38,38,.12)', stroke: '#dc2626', label: '#dc2626' },
-        debris:    { fill: 'rgba(217,119,6,.12)',  stroke: '#d97706', label: '#b45309' },
-        slope:     { fill: 'rgba(124,58,237,.12)', stroke: '#7c3aed', label: '#6d28d9' },
-        crater:    { fill: 'rgba(75,85,99,.12)',   stroke: '#4b5563', label: '#374151' },
-    };
-    zones.forEach(zone => {
-        const [zx, zy] = worldToCanvas(zone.x, zone.y);
-        const r = zone.radius * SCALE;
-        const c = zoneColors[zone.type] || zoneColors.debris;
-        ctx.fillStyle = c.fill;
-        ctx.strokeStyle = c.stroke;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath(); ctx.arc(zx, zy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = c.label;
-        ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(zone.label, zx, zy + r + 11);
-    });
-
-    // Sample sites
-    const sites = (_roverState && _roverState.sample_sites) || [];
-    const near = _roverState && _roverState.nearest_sample;
-    sites.forEach(site => {
-        const [sx, sy] = worldToCanvas(site.x, site.y);
-        const isTarget = near && near.id === site.id;
-        if (site.collected) {
-            // Collected — faded checkmark
-            ctx.fillStyle = 'rgba(22,163,74,.18)';
-            ctx.beginPath(); ctx.arc(sx, sy, 7, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#16a34a';
-            ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText('✓', sx, sy + 4);
-        } else {
-            // Pending — diamond marker
-            const size = isTarget ? 9 : 7;
-            ctx.save();
-            ctx.translate(sx, sy);
-            ctx.rotate(Math.PI / 4);
-            ctx.fillStyle = isTarget ? '#16a34a' : '#d97706';
-            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
-            ctx.fillRect(-size, -size, size * 2, size * 2);
-            ctx.strokeRect(-size, -size, size * 2, size * 2);
-            ctx.restore();
-            // Pulsing target ring
-            if (isTarget && near.in_range) {
-                ctx.strokeStyle = 'rgba(22,163,74,.6)'; ctx.lineWidth = 2;
-                ctx.setLineDash([3, 3]);
-                ctx.beginPath(); ctx.arc(sx, sy, 14, 0, Math.PI * 2); ctx.stroke();
-                ctx.setLineDash([]);
-            }
-            // Label
-            ctx.fillStyle = '#1e3a5f';
-            ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText(`${site.id} ${site.type}`, sx, sy - 11);
-        }
-    });
-
-    // Collection-range ring around the rover
-    if (_roverState && _roverState.x !== undefined) {
-        const [rx0, ry0] = worldToCanvas(_roverState.x, _roverState.y);
-        ctx.strokeStyle = 'rgba(217,119,6,.25)'; ctx.lineWidth = 1;
-        ctx.setLineDash([2, 4]);
-        ctx.beginPath(); ctx.arc(rx0, ry0, 3 * SCALE, 0, Math.PI * 2); ctx.stroke();
-        ctx.setLineDash([]);
-    }
-
-    // Base / origin marker
-    ctx.fillStyle = 'rgba(220,38,38,.2)';
-    ctx.beginPath(); ctx.arc(CX, CY, 8, 0, Math.PI * 2); ctx.fill();
+    // Base / origin marker (landing site at world origin)
+    const [bx, by] = worldToCanvas(0, 0);
+    ctx.fillStyle = 'rgba(220,38,38,.25)';
+    ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#dc2626';
     ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('BASE', CX, CY + 19);
+    ctx.fillText('BASE', bx, by + 19);
 
     // Controller rover trail
     const trail = (_roverState && _roverState.trail) || [];
@@ -472,6 +469,305 @@ function drawTerrainMap(roverState = null) {
     ctx.beginPath(); ctx.moveTo(10, H - 14); ctx.lineTo(10 + sb, H - 14); ctx.stroke();
     ctx.fillStyle = '#4a5568'; ctx.font = '8px sans-serif'; ctx.textAlign = 'left';
     ctx.fillText('10 m', 14, H - 5);
+
+    // Fog mask first, then all markers ABOVE it so samples / debris / radiation
+    // circles are always visible over the moon image and the fog.
+    renderFogOfWar(ctx, worldToCanvas, SCALE, roverState);
+    renderMapFeatures(ctx, worldToCanvas, SCALE);
+    renderRoverForeground(ctx, worldToCanvas, SCALE, roverState);
+
+    if (moonMapData) {
+        updateMoonMapSummary(moonMapData);
+    }
+}
+
+// Hazard zones, sample sites and the collection ring — drawn above the fog so
+// they always appear over the moon terrain.
+function renderMapFeatures(ctx, worldToCanvas, SCALE) {
+    // Planned safe route (drawn first so markers sit on top)
+    if (plannedPath && plannedPath.length > 1) {
+        ctx.save();
+        // glow underlay
+        ctx.strokeStyle = 'rgba(45,212,191,.35)';
+        ctx.lineWidth = 6; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.beginPath();
+        plannedPath.forEach(([wx, wy], i) => {
+            const [cx, cy] = worldToCanvas(wx, wy);
+            i === 0 ? ctx.moveTo(cx, cy) : ctx.lineTo(cx, cy);
+        });
+        ctx.stroke();
+        // dashed core line
+        ctx.strokeStyle = '#14b8a6';
+        ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        plannedPath.forEach(([wx, wy], i) => {
+            const [cx, cy] = worldToCanvas(wx, wy);
+            i === 0 ? ctx.moveTo(cx, cy) : ctx.lineTo(cx, cy);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // waypoint dots + goal flag
+        plannedPath.forEach(([wx, wy], i) => {
+            const [cx, cy] = worldToCanvas(wx, wy);
+            if (i === plannedPath.length - 1) {
+                ctx.fillStyle = '#14b8a6';
+                ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
+                ctx.fillText('⚑', cx, cy - 8);
+            } else if (i > 0) {
+                ctx.fillStyle = 'rgba(20,184,166,.9)';
+                ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+            }
+        });
+        ctx.restore();
+    }
+    // Hazard zones (radiation / debris / slope / crater)
+    const zones = (_roverState && _roverState.hazard_zones) || [];
+    const zoneColors = {
+        radiation: { fill: 'rgba(220,38,38,.22)', stroke: '#f87171', label: '#fca5a5' },
+        debris:    { fill: 'rgba(217,119,6,.22)',  stroke: '#fbbf24', label: '#fcd34d' },
+        slope:     { fill: 'rgba(124,58,237,.22)', stroke: '#a78bfa', label: '#c4b5fd' },
+        crater:    { fill: 'rgba(148,163,184,.22)', stroke: '#cbd5e1', label: '#e2e8f0' },
+    };
+    zones.forEach(zone => {
+        const [zx, zy] = worldToCanvas(zone.x, zone.y);
+        const r = zone.radius * SCALE;
+        const c = zoneColors[zone.type] || zoneColors.debris;
+        ctx.fillStyle = c.fill;
+        ctx.strokeStyle = c.stroke;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath(); ctx.arc(zx, zy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = c.label;
+        ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(zone.label, zx, zy + r + 11);
+    });
+
+    // Sample sites
+    const sites = (_roverState && _roverState.sample_sites) || [];
+    const near = _roverState && _roverState.nearest_sample;
+    sites.forEach(site => {
+        const [sx, sy] = worldToCanvas(site.x, site.y);
+        const isTarget = near && near.id === site.id;
+        if (site.collected) {
+            ctx.fillStyle = 'rgba(22,163,74,.30)';
+            ctx.beginPath(); ctx.arc(sx, sy, 7, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#4ade80';
+            ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('✓', sx, sy + 4);
+        } else {
+            const size = isTarget ? 9 : 7;
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.rotate(Math.PI / 4);
+            ctx.fillStyle = isTarget ? '#22c55e' : '#f59e0b';
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+            ctx.fillRect(-size, -size, size * 2, size * 2);
+            ctx.strokeRect(-size, -size, size * 2, size * 2);
+            ctx.restore();
+            if (isTarget && near.in_range) {
+                ctx.strokeStyle = 'rgba(74,222,128,.8)'; ctx.lineWidth = 2;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath(); ctx.arc(sx, sy, 14, 0, Math.PI * 2); ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            // Label with dark halo so it reads over bright terrain
+            ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center';
+            ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(4,6,12,.8)';
+            ctx.strokeText(`${site.id} ${site.type}`, sx, sy - 11);
+            ctx.fillStyle = '#fde68a';
+            ctx.fillText(`${site.id} ${site.type}`, sx, sy - 11);
+        }
+    });
+
+    // Collection-range ring around the rover
+    if (_roverState && _roverState.x !== undefined) {
+        const [rx0, ry0] = worldToCanvas(_roverState.x, _roverState.y);
+        ctx.strokeStyle = 'rgba(245,158,11,.5)'; ctx.lineWidth = 1.2;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath(); ctx.arc(rx0, ry0, 3 * SCALE, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+}
+
+// Draw the moon terrain image tiled across world space (only matters where fog is lifted)
+function drawMoonBase(ctx, worldToCanvas, pxpm, camX, camY, W, H) {
+    if (!moonImgLoaded) {
+        ctx.fillStyle = '#0c1018';
+        ctx.fillRect(0, 0, W, H);
+        return;
+    }
+    // World bounds currently visible
+    const halfW = (W / 2) / pxpm, halfH = (H / 2) / pxpm;
+    const minX = camX - halfW, maxX = camX + halfW;
+    const minY = camY - halfH, maxY = camY + halfH;
+
+    // Which image tiles cover the view (tile i centered at i*SPAN)
+    const iMin = Math.floor((minX + MOON_SPAN_X / 2) / MOON_SPAN_X);
+    const iMax = Math.floor((maxX + MOON_SPAN_X / 2) / MOON_SPAN_X);
+    const jMin = Math.floor((minY + MOON_SPAN_Y / 2) / MOON_SPAN_Y);
+    const jMax = Math.floor((maxY + MOON_SPAN_Y / 2) / MOON_SPAN_Y);
+
+    const destW = MOON_SPAN_X * pxpm;
+    const destH = MOON_SPAN_Y * pxpm;
+    ctx.imageSmoothingEnabled = true;
+    for (let i = iMin; i <= iMax; i++) {
+        for (let j = jMin; j <= jMax; j++) {
+            const cx = i * MOON_SPAN_X, cy = j * MOON_SPAN_Y;       // tile centre in world
+            // top-left world corner of this tile
+            const [dx, dy] = worldToCanvas(cx - MOON_SPAN_X / 2, cy + MOON_SPAN_Y / 2);
+            // Mirror alternate tiles so seams are less obvious
+            ctx.save();
+            ctx.translate(dx, dy);
+            if ((i + j) & 1) { ctx.translate(destW, 0); ctx.scale(-1, 1); }
+            ctx.drawImage(MOON_IMG, 0, 0, destW, destH);
+            ctx.restore();
+        }
+    }
+    // Cool lunar tint
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = 'rgba(150,160,185,0.85)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+}
+
+function getExploredPoints(roverState = null) {
+    const points = [];
+    let prev = null;
+    const addPoint = (point) => {
+        if (!Array.isArray(point) || point.length < 2) return;
+        const x = Number(point[0]);
+        const y = Number(point[1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        // Interpolate from the previous point so big jumps (mission waypoints
+        // ~25 m apart) reveal as a continuous corridor instead of dotted holes.
+        if (prev) {
+            const dx = x - prev[0], dy = y - prev[1];
+            const dist = Math.hypot(dx, dy);
+            const steps = Math.floor(dist / 4);   // a reveal point every ~4 m
+            for (let i = 1; i < steps; i++) {
+                points.push([prev[0] + (dx * i) / steps, prev[1] + (dy * i) / steps]);
+            }
+        }
+        const last = points[points.length - 1];
+        if (!last || Math.abs(last[0] - x) > 0.05 || Math.abs(last[1] - y) > 0.05) {
+            points.push([x, y]);
+        }
+        prev = [x, y];
+    };
+
+    // Landing site is known from the start; everything else must be driven near.
+    addPoint([0, 0]);
+    prev = null;
+    ((_roverState && _roverState.trail) || []).forEach(addPoint);
+    if (_roverState && _roverState.x !== undefined) addPoint([_roverState.x, _roverState.y]);
+    prev = null;
+    missionTrail.forEach(addPoint);
+    if (roverState && roverState.rover_position) addPoint(roverState.rover_position);
+    return points;
+}
+
+function renderFogOfWar(ctx, worldToCanvas, scale, roverState = null) {
+    const canvas = ctx.canvas;
+    const revealRadius = MAP_VISION_M * scale;
+    const points = getExploredPoints(roverState);
+
+    // Opaque lunar-night fog; punch soft holes where the rover has had line of sight
+    ctx.save();
+    ctx.fillStyle = 'rgba(4, 6, 12, 0.97)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.globalCompositeOperation = 'destination-out';
+
+    points.forEach(([wx, wy]) => {
+        const [cx, cy] = worldToCanvas(wx, wy);
+        const gradient = ctx.createRadialGradient(cx, cy, revealRadius * 0.45, cx, cy, revealRadius);
+        gradient.addColorStop(0, 'rgba(0,0,0,1)');
+        gradient.addColorStop(0.7, 'rgba(0,0,0,.9)');
+        gradient.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(cx, cy, revealRadius, 0, Math.PI * 2);
+        ctx.fill();
+    });
+    ctx.restore();
+
+    // Bright vision ring around the rover's current field of view
+    if (_roverState && _roverState.x !== undefined) {
+        const [cx, cy] = worldToCanvas(_roverState.x, _roverState.y);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(120,190,255,0.22)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.arc(cx, cy, revealRadius, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+    }
+
+    // Explored percentage readout
+    ctx.save();
+    ctx.fillStyle = 'rgba(200,215,240,0.6)';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`EXPLORED ${Math.min(99, Math.round(points.length * 1.2))}%`, canvas.width - 12, canvas.height - 10);
+    ctx.restore();
+}
+
+function renderRoverForeground(ctx, worldToCanvas, scale, roverState = null) {
+    const canvas = ctx.canvas;
+
+    const drawTrail = (trail, color) => {
+        if (!Array.isArray(trail) || trail.length < 2) return;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.7;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        trail.forEach(([tx, ty], i) => {
+            const [cx, cy] = worldToCanvas(tx, ty);
+            i === 0 ? ctx.moveTo(cx, cy) : ctx.lineTo(cx, cy);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+    };
+
+    drawTrail((_roverState && _roverState.trail) || [], 'rgba(147,197,253,.9)');
+    drawTrail(missionTrail, 'rgba(74,222,128,.85)');
+
+    if (roverState && roverState.rover_position) {
+        const [mx, my] = roverState.rover_position;
+        const [sx, sy] = worldToCanvas(mx, my);
+        ctx.fillStyle = 'rgba(74,222,128,.25)';
+        ctx.beginPath(); ctx.arc(sx, sy, 12, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    if (_roverState && _roverState.x !== undefined) {
+        const { x, y, heading } = _roverState;
+        const [rx, ry] = worldToCanvas(x, y);
+        const headRad = (heading - 90) * Math.PI / 180;
+        const inDanger = (_roverState.alerts || []).some(a => a.severity === 'DANGER');
+        const roverColor = inDanger ? '#dc2626' : '#38bdf8';
+
+        ctx.fillStyle = inDanger ? 'rgba(220,38,38,.24)' : 'rgba(56,189,248,.25)';
+        ctx.beginPath(); ctx.arc(rx, ry, 14, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = roverColor;
+        ctx.beginPath(); ctx.arc(rx, ry, 6, 0, Math.PI * 2); ctx.fill();
+
+        const ax = rx + Math.cos(headRad) * 17;
+        const ay = ry + Math.sin(headRad) * 17;
+        ctx.strokeStyle = roverColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(ax, ay); ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(255,255,255,.7)';
+    ctx.lineWidth = 1.5;
+    const sb = 10 * scale;
+    ctx.beginPath(); ctx.moveTo(10, canvas.height - 14); ctx.lineTo(10 + sb, canvas.height - 14); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.font = '8px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('10 m', 14, canvas.height - 5);
 }
 
 // Logging Functions
@@ -853,6 +1149,209 @@ function formatKey(key) {
         .join(' ');
 }
 
+async function fetchAstronautHealth() {
+    try {
+        const res = await fetch(`${API_BASE}/api/astronaut/health`);
+        if (!res.ok) return;
+        const data = await res.json();
+        astronautSafetySnapshot = data;
+        updateAstronautHealth(data);
+    } catch (e) {
+        // server not ready yet â€” will catch up on next push
+    }
+}
+
+async function fetchRecentAlerts() {
+    try {
+        const res = await fetch(`${API_BASE}/api/alerts`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderSafetyAlerts(data || []);
+    } catch (e) {
+        // ignore until the websocket snapshot arrives
+    }
+}
+
+async function loadMoonMap() {
+    try {
+        const res = await fetch(`${API_BASE}/api/lunar-map?rows=10&cols=16`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.error) return;
+        moonMapData = data;
+        updateMoonMapSummary(data);
+        drawTerrainMap();
+    } catch (e) {
+        // ignore during server warm-up
+    }
+}
+
+function updateAstronautHealth(snapshot) {
+    const hrEl = document.getElementById('astronaut-hr');
+    const statusEl = document.getElementById('astronaut-hr-status');
+    const radEl = document.getElementById('astronaut-radiation');
+    const pressureEl = document.getElementById('astronaut-pressure');
+    const warningList = document.getElementById('astronaut-warning-signs');
+
+    if (!snapshot) return;
+
+    const prediction = snapshot.prediction || {};
+    const conditions = snapshot.conditions || {};
+    const hr = prediction.predicted_heart_rate ?? snapshot.biometrics?.heart_rate;
+    const status = (prediction.heart_rate_status || snapshot.health_status || 'nominal').toLowerCase();
+    const statusLabel = status.toUpperCase();
+    const statusText = snapshot.recommendation?.action
+        ? `${statusLabel} - ${snapshot.recommendation.action.replace(/_/g, ' ')}`
+        : statusLabel;
+
+    if (hrEl && hr !== undefined) hrEl.textContent = hr;
+    if (statusEl) {
+        statusEl.textContent = statusText;
+        statusEl.className = `health-status-pill status-${status}`;
+    }
+    if (radEl) radEl.textContent = Number(conditions.radiation_usv_h ?? 0).toFixed(1);
+    if (pressureEl) pressureEl.textContent = Number(conditions.suit_pressure ?? 0).toFixed(1);
+
+    if (warningList) {
+        const warnings = [];
+        if (snapshot.radiation_alert) warnings.push(snapshot.radiation_alert.message);
+        if (Array.isArray(prediction.warning_signs)) warnings.push(...prediction.warning_signs);
+        if (Array.isArray(snapshot.health_alerts)) warnings.push(...snapshot.health_alerts);
+        if (Array.isArray(snapshot.suit_alerts)) warnings.push(...snapshot.suit_alerts);
+
+        const uniqueWarnings = [...new Set(warnings.filter(Boolean))];
+        if (uniqueWarnings.length === 0) {
+            warningList.innerHTML = '<li>No active warning signs</li>';
+        } else {
+            warningList.innerHTML = uniqueWarnings.map(w => `<li>${escapeHtml(w)}</li>`).join('');
+        }
+    }
+}
+
+function renderSafetyAlerts(alerts) {
+    const container = document.getElementById('alerts-container');
+    if (!container) return;
+
+    recentAlerts = Array.isArray(alerts) ? alerts.slice() : [];
+    if (recentAlerts.length === 0) {
+        container.innerHTML = '<p class="placeholder">No active alerts</p>';
+        return;
+    }
+
+    container.innerHTML = recentAlerts.slice(0, 8).map(renderSafetyAlert).join('');
+}
+
+function prependSafetyAlert(alert) {
+    if (!alert) return;
+    const signature = `${alert.category || 'general'}:${alert.severity || 'normal'}:${alert.message || ''}`;
+    const filtered = recentAlerts.filter(a => `${a.category || 'general'}:${a.severity || 'normal'}:${a.message || ''}` !== signature);
+    recentAlerts = [alert, ...filtered].slice(0, 8);
+    renderSafetyAlerts(recentAlerts);
+}
+
+function renderSafetyAlert(alert) {
+    const severity = (alert.severity || 'normal').toLowerCase();
+    const title = alert.title || 'Safety alert';
+    const message = alert.message || '';
+    const recommendation = alert.recommendation || '';
+    return `
+        <div class="alert-item alert-${severity}">
+            <div class="alert-top">
+                <span class="alert-title">${escapeHtml(title)}</span>
+                <span class="alert-badge">${severity.toUpperCase()}</span>
+            </div>
+            <div class="alert-message">${escapeHtml(message)}</div>
+            ${recommendation ? `<div class="alert-recommendation">${escapeHtml(recommendation)}</div>` : ''}
+        </div>
+    `;
+}
+
+function updateMoonMapSummary(data) {
+    const el = document.getElementById('moon-map-summary');
+    if (!el) return;
+    if (!data || !data.summary) {
+        el.textContent = 'Lunar probability surface unavailable.';
+        return;
+    }
+
+    const s = data.summary;
+    const source = data.source || {};
+    const best = s.best_cell || {};
+    const richest = s.richest_cell || {};
+    const riskiest = s.riskiest_cell || {};
+    const iciest = s.iciest_cell || {};
+    const agri = s.agri_cell || {};
+
+    el.innerHTML = `
+        <div class="moon-summary-row">
+            <strong>Best zone</strong>
+            <span>${Math.round((best.composite_probability || 0) * 100)}%</span>
+            <span>${best.label || 'Survey Zone'}</span>
+        </div>
+        <div class="moon-summary-row">
+            <strong>Richest resource</strong>
+            <span>${Math.round((richest.resource_probability || 0) * 100)}%</span>
+            <span>${richest.label || 'sample potential'}</span>
+        </div>
+        <div class="moon-summary-row">
+            <strong>Ice deposit</strong>
+            <span>${Math.round((iciest.ice_probability || 0) * 100)}%</span>
+            <span>row ${iciest.row ?? '--'}, col ${iciest.col ?? '--'}</span>
+        </div>
+        <div class="moon-summary-row">
+            <strong>Agri-viable</strong>
+            <span>${Math.round((agri.agriculture_score || 0) * 100)}%</span>
+            <span>${agri.label || 'soil'}</span>
+        </div>
+        <div class="moon-summary-row">
+            <strong>Highest hazard</strong>
+            <span>${Math.round((riskiest.hazard_probability || 0) * 100)}%</span>
+            <span>${riskiest.label || 'Radiation Watch'}</span>
+        </div>
+        <div class="moon-summary-note">${escapeHtml(source.note || 'Modeled from the lunar datasets in the workspace.')} ${source.resource_survey_points ? `(${source.resource_survey_points} resource survey points)` : ''}</div>
+    `;
+}
+
+function renderMoonProbabilityLayer(ctx, worldToCanvas, scale) {
+    if (!moonMapData || !moonMapData.cells) return;
+
+    const rows = moonMapData.summary?.rows || 10;
+    const cols = moonMapData.summary?.cols || 16;
+    const worldWidth = 48;
+    const worldHeight = 34;
+    const cellWidth = worldWidth / cols;
+    const cellHeight = worldHeight / rows;
+
+    moonMapData.cells.forEach(cell => {
+        const centerX = cell.x_norm * (worldWidth / 2);
+        const centerY = cell.y_norm * (worldHeight / 2);
+        const [cx, cy] = worldToCanvas(centerX, centerY);
+        const width = cellWidth * scale;
+        const height = cellHeight * scale;
+
+        let color;
+        if ((cell.hazard_probability || 0) >= 0.75) {
+            color = `rgba(220, 38, 38, ${0.12 + (cell.hazard_probability || 0) * 0.38})`;
+        } else if ((cell.resource_probability || 0) >= 0.70) {
+            color = `rgba(245, 158, 11, ${0.12 + (cell.resource_probability || 0) * 0.36})`;
+        } else {
+            color = `rgba(59, 130, 246, ${0.08 + (cell.safe_probability || 0) * 0.28})`;
+        }
+
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - width / 2, cy - height / 2, width, height);
+    });
+}
+
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Polling for active missions
 setInterval(updateActiveMissionsList, 2000);
 setInterval(updateSamplesList, 1000);
@@ -897,6 +1396,116 @@ async function setSpeed(val) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: parseFloat(val) })
     });
+}
+
+// ── Full simulation restart ───────────────────────────────────────────────────
+async function restartSimulation() {
+    if (!confirm('Restart the whole simulation? This clears the route, samples, missions and explored map.')) return;
+
+    // Stop any local activity
+    autoDriving = false;
+    plannedPath = [];
+    missionTrail = [];
+    activeMissionId = null;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/simulation/reset`, { method: 'POST' });
+        const data = await res.json();
+
+        // Wipe frontend panels back to their initial state
+        const reset = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+        reset('logs-container', '<p class="placeholder">Logs appear here during a mission</p>');
+        reset('samples-container', '<p class="placeholder">No samples yet</p>');
+        reset('samples-container-logs', '<p class="placeholder">No samples yet</p>');
+        reset('mission-info', '<p class="placeholder">No active mission</p>');
+        reset('mission-info-logs', '<p class="placeholder">No active mission</p>');
+        const strip = document.getElementById('mission-status-strip');
+        if (strip) strip.style.display = 'none';
+        const pathInfo = document.getElementById('path-info');
+        if (pathInfo) { pathInfo.textContent = ''; pathInfo.classList.remove('danger'); }
+        const adBtn = document.getElementById('autodrive-btn');
+        if (adBtn) adBtn.disabled = true;
+        const reportBtn = document.getElementById('view-report-btn');
+        if (reportBtn) reportBtn.style.display = 'none';
+
+        applyRoverState(data);
+        addLog('⟳ Simulation restarted — back to the landing site.');
+    } catch (e) {
+        console.error('Restart error', e);
+        alert('Could not restart simulation: ' + e.message);
+    }
+}
+
+// ── Hazard-aware path planning ────────────────────────────────────────────────
+let plannedPath = [];
+let autoDriving = false;
+
+async function planSafePath() {
+    const info = document.getElementById('path-info');
+    info.classList.remove('danger');
+    info.textContent = 'Planning safe route…';
+    try {
+        const res = await fetch(`${API_BASE}/api/rover/plan_path`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})   // default = nearest uncollected sample
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            plannedPath = [];
+            info.classList.add('danger');
+            info.textContent = data.message || 'No safe route found.';
+            document.getElementById('autodrive-btn').disabled = true;
+            drawTerrainMap();
+            return;
+        }
+        plannedPath = data.waypoints || [];
+        const exposureTxt = data.hazard_exposure > 25 ? ' ⚠ some exposure' : ' ✓ low exposure';
+        info.textContent = `→ ${data.goal}: ${data.length_m} m,${exposureTxt}`;
+        document.getElementById('autodrive-btn').disabled = false;
+        addLog(`🛰 ${data.message}`);
+        drawTerrainMap();
+    } catch (e) {
+        info.classList.add('danger');
+        info.textContent = 'Route planning failed.';
+        console.error('plan path error', e);
+    }
+}
+
+async function toggleAutoDrive() {
+    const btn = document.getElementById('autodrive-btn');
+    if (autoDriving) { autoDriving = false; return; }     // stop request
+    if (!plannedPath.length) return;
+
+    autoDriving = true;
+    btn.classList.add('running');
+    btn.textContent = '■ Stop';
+
+    // Drive through waypoints, skipping the first (current position)
+    for (let i = 1; i < plannedPath.length; i++) {
+        if (!autoDriving) break;
+        const [x, y] = plannedPath[i];
+        try {
+            const res = await fetch(`${API_BASE}/api/rover/goto`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ x, y })
+            });
+            const data = await res.json();
+            if (!data.error) applyRoverState(data);
+        } catch (e) { console.error('auto-drive step error', e); break; }
+        await new Promise(r => setTimeout(r, 320));        // animation pacing
+    }
+
+    autoDriving = false;
+    btn.classList.remove('running');
+    btn.textContent = '▶ Auto-Drive';
+
+    // Arrived — try to collect if a sample is in range
+    if (_roverState && _roverState.nearest_sample && _roverState.nearest_sample.in_range) {
+        collectSample();
+    }
+    addLog('🛰 Auto-drive complete.');
 }
 
 function applyRoverState(state) {
@@ -1004,8 +1613,15 @@ async function collectSample() {
         const res = await fetch(`${API_BASE}/api/rover/collect`, { method: 'POST' });
         const data = await res.json();
         addLog(data.ok ? `🪨 ${data.message}` : `⚠ ${data.message}`);
+        if (data.ok) {
+            // Route consumed — clear the planned path and its UI
+            plannedPath = [];
+            document.getElementById('autodrive-btn').disabled = true;
+            const info = document.getElementById('path-info');
+            if (info) { info.textContent = ''; info.classList.remove('danger'); }
+            renderCollectedSamples(data.collected_samples);
+        }
         if (data.x !== undefined) applyRoverState(data);
-        if (data.ok) renderCollectedSamples(data.collected_samples);
     } catch (e) { console.error('Collect error', e); }
 }
 

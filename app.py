@@ -10,6 +10,7 @@ from flask_socketio import SocketIO, emit
 import json
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 import uuid
@@ -29,6 +30,8 @@ from ai.vision.classifier import RockClassifier
 from ai.fusion.sensor_fusion import SensorFusion
 from ai.reasoning.scientist import Scientist
 from ai.planning.route_planner import RoutePlanner
+from ai.health_monitoring import AstronautMonitor, AstronautBiometrics
+from ai.lunar_mapping import LunarProbabilityMapGenerator
 import pandas as pd
 from data.datasets import DatasetLoader
 from data.sensor_loader import SensorDataLoader
@@ -37,16 +40,15 @@ from data.sensor_loader import SensorDataLoader
 active_missions = {}
 mission_threads = {}
 
-# ── Load env-probe CSV once at startup ───────────────────────────────────────
-# Real Lunar environment data (South Pole-Aitken Basin) converted to the
-# env-probe schema by convert_lunar_data.py. Falls back to the old mock set.
-_ENV_CSV = Path(__file__).parent / "datasets" / "lunar_env_probe_1hour.csv"
-if not _ENV_CSV.exists():
-    _ENV_CSV = Path(__file__).parent / "datasets" / "mock_env_probe_1hour.csv"
-try:
-    _env_df = pd.read_csv(_ENV_CSV)
-except Exception:
-    _env_df = None
+# ── Load the live environment dataset once at startup ────────────────────────
+_env_dataset = SensorDataLoader.load_env_probe_data()
+_env_df = _env_dataset["data"].copy() if _env_dataset else None
+_env_summary = _env_dataset["summary"] if _env_dataset else {}
+
+moon_map_generator = LunarProbabilityMapGenerator()
+astronaut_monitor = AstronautMonitor()
+recent_safety_alerts = deque(maxlen=20)
+_last_alert_state = {"radiation": None, "heart_rate": None}
 
 _app_start = time.time()
 
@@ -58,20 +60,26 @@ def _current_env_row():
     elapsed = (time.time() - _app_start) % 3600   # cycle every hour
     idx = int(elapsed / 2) % len(_env_df)          # rows are 2 s apart
     row = _env_df.iloc[idx]
+    temperature = row.get("temp_c", row.get("temperature", 0.0))
+    humidity = row.get("humidity_pct", row.get("humidity", 0.0))
+    pressure = row.get("pressure_hpa", row.get("pressure", 0.0))
+    radiation = row.get("cosmic_rad_usv_h", row.get("radiation", 0.0))
+    pm25 = row.get("pm25_ug_m3", row.get("pm25", 0.0))
+    conductivity = row.get("ec_ms_cm", row.get("conductivity", 0.0))
     return {
-        "temperature":   round(float(row["temp_c"]),            2),
-        "humidity":      round(float(row["humidity_pct"]),       2),
-        "pressure":      round(float(row["pressure_hpa"]),       1),
-        "abs_470nm":     round(float(row["abs_470nm"]),          4),
-        "abs_850nm":     round(float(row["abs_850nm"]),          4),
-        "scattering":    round(float(row["scattering_m1"]),      4),
-        "pm25":          round(float(row["pm25_ug_m3"]),         2),
-        "radiation":     round(float(row["cosmic_rad_usv_h"]),   4),
-        "conductivity":  round(float(row["ec_ms_cm"]),           3),
-        "gps_lat":       round(float(row["gps_lat"]),            6),
-        "gps_lon":       round(float(row["gps_lon"]),            6),
+        "temperature":   round(float(temperature),               2),
+        "humidity":      round(float(humidity),                  2),
+        "pressure":      round(float(pressure),                  1),
+        "abs_470nm":     round(float(row.get("abs_470nm", 0.0)), 4),
+        "abs_850nm":     round(float(row.get("abs_850nm", 0.0)), 4),
+        "scattering":    round(float(row.get("scattering_m1", 0.0)), 4),
+        "pm25":          round(float(pm25),                      2),
+        "radiation":     round(float(radiation),                 4),
+        "conductivity":  round(float(conductivity),              3),
+        "gps_lat":       round(float(row.get("gps_lat", 0.0)),   6),
+        "gps_lon":       round(float(row.get("gps_lon", 0.0)),   6),
         "row_index":     int(idx),
-        "timestamp":     str(row["timestamp"]),
+        "timestamp":     str(row.get("timestamp", "")),
     }
 
 
@@ -81,7 +89,163 @@ def _live_push_loop():
         time.sleep(2)
         reading = _current_env_row()
         if reading:
-            socketio.emit("live_sensor", reading, to="/")
+            socketio.emit("live_sensor", reading, namespace="/")
+            _broadcast_live_safety_snapshot(reading)
+
+
+def _space_conditions_from_reading(reading=None, overrides=None):
+    """Build the astronaut exposure profile from live environmental readings."""
+    reading = reading or _current_env_row()
+    overrides = overrides or {}
+    elapsed_hours = (time.time() - _app_start) / 3600.0
+
+    return {
+        "radiation_usv_h": float(overrides.get("radiation_usv_h", reading.get("radiation", 0.0))),
+        "temperature_c": float(overrides.get("temperature_c", reading.get("temperature", 0.0))),
+        "ambient_pressure_hpa": float(reading.get("pressure", 0.0)),
+        "suit_pressure": float(overrides.get("suit_pressure", 4.3)),
+        "oxygen_saturation": float(overrides.get("oxygen_saturation", 97.0)),
+        "co2_level": float(overrides.get("co2_level", 2.8 + max(0.0, float(reading.get("radiation", 0.0)) - 80.0) / 120.0)),
+        "dust_level": float(overrides.get("dust_level", reading.get("pm25", 0.0))),
+        "metabolic_rate": float(overrides.get("metabolic_rate", 320.0)),
+        "fatigue_level": float(overrides.get("fatigue_level", min(0.95, 0.25 + elapsed_hours * 0.05))),
+        "work_duration": float(overrides.get("work_duration", round(elapsed_hours, 2))),
+    }
+
+
+def _append_safety_alert(alert):
+    """Store an alert and emit it to connected clients."""
+    if not alert:
+        return False
+
+    alert = dict(alert)
+    alert.setdefault("timestamp", datetime.utcnow().isoformat() + "Z")
+    category = alert.get("category", "general")
+    signature = (category, alert.get("severity"), alert.get("message"))
+    if _last_alert_state.get(category) == signature:
+        return False
+
+    _last_alert_state[category] = signature
+    recent_safety_alerts.appendleft(alert)
+    socketio.emit("safety_alert", alert, namespace="/")
+    return True
+
+
+def _build_astronaut_health_snapshot(reading=None, overrides=None):
+    """Generate a health snapshot from the current space conditions."""
+    reading = reading or _current_env_row()
+    overrides = overrides or {}
+    conditions = _space_conditions_from_reading(reading, overrides=overrides)
+    baseline_heart_rate = int(overrides.get("baseline_heart_rate", 72))
+    prediction = astronaut_monitor.predict_heart_rate_from_conditions(
+        baseline_heart_rate=baseline_heart_rate,
+        conditions=conditions,
+    )
+
+    biometrics = AstronautBiometrics(
+        astronaut_id="EVA-001",
+        timestamp=time.time(),
+        heart_rate=prediction["predicted_heart_rate"],
+        blood_pressure_sys=128,
+        blood_pressure_dia=82,
+        core_temperature=37.2,
+        oxygen_saturation=int(conditions["oxygen_saturation"]),
+        respiration_rate=17,
+        suit_pressure=float(conditions["suit_pressure"]),
+        oxygen_remaining=max(0.5, 4.5 - conditions["work_duration"] * 0.4),
+        co2_level=float(conditions["co2_level"]),
+        suit_integrity=98.0,
+        ambient_dust=float(conditions["dust_level"]),
+        suit_temperature=float(conditions["temperature_c"]),
+        radiation_exposure=float(conditions["radiation_usv_h"] / 1000.0),
+        metabolic_rate=float(conditions["metabolic_rate"]),
+        work_duration=float(conditions["work_duration"]),
+        fatigue_level=float(conditions["fatigue_level"]),
+    )
+
+    health_status, health_alerts = astronaut_monitor.assess_health_status(biometrics)
+    suit_status, suit_alerts = astronaut_monitor.assess_suit_status(biometrics)
+    recommendation = astronaut_monitor.recommend_action(health_status, suit_status, biometrics)
+
+    radiation_value = float(conditions["radiation_usv_h"])
+    if radiation_value >= 120:
+        radiation_alert = {
+            "category": "radiation",
+            "severity": "critical",
+            "title": "High radiation alert",
+            "message": f"Radiation at {radiation_value:.1f} uSv/h exceeds the safe EVA threshold.",
+            "value": round(radiation_value, 1),
+            "unit": "uSv/h",
+            "recommendation": "Return to shelter immediately and reduce exposure.",
+        }
+    elif radiation_value >= 90:
+        radiation_alert = {
+            "category": "radiation",
+            "severity": "warning",
+            "title": "Elevated radiation",
+            "message": f"Radiation is {radiation_value:.1f} uSv/h. Shorten EVA duration and monitor crew response.",
+            "value": round(radiation_value, 1),
+            "unit": "uSv/h",
+            "recommendation": "Limit time outside and keep monitoring heart rate.",
+        }
+    else:
+        radiation_alert = {
+            "category": "radiation",
+            "severity": "normal",
+            "title": "Radiation nominal",
+            "message": f"Radiation remains at {radiation_value:.1f} uSv/h.",
+            "value": round(radiation_value, 1),
+            "unit": "uSv/h",
+            "recommendation": "Continue routine monitoring.",
+        }
+
+    heart_rate_alert = {
+        "category": "heart_rate",
+        "severity": prediction["heart_rate_status"],
+        "title": "Astronaut heart rate forecast",
+        "message": f"Predicted heart rate is {prediction['predicted_heart_rate']} bpm.",
+        "value": prediction["predicted_heart_rate"],
+        "unit": "bpm",
+        "recommendation": prediction["recommendation"],
+        "drivers": prediction["drivers"],
+        "warning_signs": prediction["warning_signs"],
+    }
+
+    snapshot = {
+        "astronaut_id": biometrics.astronaut_id,
+        "baseline_heart_rate": baseline_heart_rate,
+        "conditions": conditions,
+        "prediction": prediction,
+        "health_status": health_status.value,
+        "suit_status": suit_status.value,
+        "health_alerts": health_alerts,
+        "suit_alerts": suit_alerts,
+        "recommendation": recommendation,
+        "radiation_alert": radiation_alert,
+        "heart_rate_alert": heart_rate_alert,
+        "biometrics": {
+            "heart_rate": biometrics.heart_rate,
+            "oxygen_saturation": biometrics.oxygen_saturation,
+            "suit_pressure": biometrics.suit_pressure,
+            "fatigue_level": biometrics.fatigue_level,
+            "oxygen_remaining": biometrics.oxygen_remaining,
+        },
+    }
+
+    if radiation_alert["severity"] in {"warning", "critical"}:
+        _append_safety_alert(radiation_alert)
+    if prediction["heart_rate_status"] in {"warning", "critical"}:
+        _append_safety_alert(heart_rate_alert)
+
+    return snapshot
+
+
+def _broadcast_live_safety_snapshot(reading=None):
+    """Publish the current astronaut safety state when it changes."""
+    snapshot = _build_astronaut_health_snapshot(reading)
+    socketio.emit("safety_snapshot", snapshot, namespace="/")
+    return snapshot
+
 
 _push_thread = threading.Thread(target=_live_push_loop, daemon=True)
 _push_thread.start()
@@ -545,6 +709,42 @@ _rover_state = {
     "alerts": [],
 }
 
+# Pristine snapshot of the world so "restart simulation" returns to a clean slate
+import copy as _copy
+_INITIAL_SAMPLE_SITES = _copy.deepcopy(_rover_state["sample_sites"])
+_INITIAL_HAZARD_ZONES = _copy.deepcopy(_rover_state["hazard_zones"])
+
+
+def _full_reset():
+    """Restart the entire simulation: rover, samples, path, and any active missions."""
+    # Stop / forget any running missions
+    active_missions.clear()
+    mission_threads.clear()
+
+    # Reset the rover and rebuild the world from the pristine snapshot
+    _rover_state.update({
+        "x": 0.0, "y": 0.0, "heading": 0.0,
+        "speed": 2.0, "battery": 100.0, "odometer": 0.0,
+        "trail": [], "alerts": [],
+        "hazard_zones": _copy.deepcopy(_INITIAL_HAZARD_ZONES),
+        "sample_sites": _copy.deepcopy(_INITIAL_SAMPLE_SITES),
+        "collected_samples": [],
+    })
+    _rover_state.pop("planned_path", None)
+
+    payload = {**_rover_state, "alerts": [],
+               "nearest_sample": _nearest_sample_info(),
+               "field_scan": _field_scan()}
+    socketio.emit("rover_moved", payload, namespace="/")
+    socketio.emit("simulation_reset", payload, namespace="/")
+    return payload
+
+
+@app.route("/api/simulation/reset", methods=["POST"])
+def reset_simulation():
+    """Full simulation restart — everything back to the starting state."""
+    return jsonify({"ok": True, **_full_reset()})
+
 
 def _nearest_sample():
     """Return (site, distance) of the closest uncollected sample, or (None, inf)."""
@@ -697,6 +897,191 @@ def rover_scan():
                     "position": {"x": _rover_state["x"], "y": _rover_state["y"]}})
 
 
+# ── Hazard-aware path planning (A*) ───────────────────────────────────────────
+import heapq as _heapq
+
+PATH_GRID = 1.5          # metres per planning cell
+PATH_MARGIN = 22.0       # how far beyond start/goal to search
+
+
+def _cell_hazard_cost(x, y):
+    """
+    Extra traversal cost at world (x, y) from hazard zones + live radiation.
+    Returns (cost, blocked). Inside a zone is effectively blocked; a buffer
+    around each zone is expensive so routes give hazards a wide berth.
+    """
+    cost = 0.0
+    blocked = False
+    for z in _rover_state["hazard_zones"]:
+        d = _math.sqrt((x - z["x"]) ** 2 + (y - z["y"]) ** 2)
+        r = z["radius"]
+        weight = 6.0 if z["type"] == "radiation" else 4.0   # avoid radiation most
+        if d <= r:
+            blocked = True
+        elif d <= r + 6.0:                     # 6 m safety buffer
+            cost += weight * (1.0 - (d - r) / 6.0)
+    # Live cosmic radiation raises the whole-field cost when elevated
+    rad = _current_env_row().get("radiation", 0)
+    if rad > 90:
+        cost += (rad - 90) / 30.0
+    return cost, blocked
+
+
+def _plan_path(start, goal):
+    """A* over a grid from start to goal, minimizing hazard/radiation exposure."""
+    sx, sy = start
+    gx, gy = goal
+
+    minx = min(sx, gx) - PATH_MARGIN
+    maxx = max(sx, gx) + PATH_MARGIN
+    miny = min(sy, gy) - PATH_MARGIN
+    maxy = max(sy, gy) + PATH_MARGIN
+
+    def to_cell(x, y):
+        return (round((x - minx) / PATH_GRID), round((y - miny) / PATH_GRID))
+
+    def to_world(cx, cy):
+        return (minx + cx * PATH_GRID, miny + cy * PATH_GRID)
+
+    start_c = to_cell(sx, sy)
+    goal_c = to_cell(gx, gy)
+    cols = int((maxx - minx) / PATH_GRID) + 1
+    rows = int((maxy - miny) / PATH_GRID) + 1
+
+    def heuristic(c):
+        return _math.hypot(c[0] - goal_c[0], c[1] - goal_c[1]) * PATH_GRID
+
+    neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                 (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+    open_heap = [(0.0, start_c)]
+    came_from = {}
+    g_score = {start_c: 0.0}
+    visited = set()
+    exposure = 0.0
+
+    while open_heap:
+        _, cur = _heapq.heappop(open_heap)
+        if cur in visited:
+            continue
+        visited.add(cur)
+        if cur == goal_c:
+            break
+        for dx, dy in neighbors:
+            nx, ny = cur[0] + dx, cur[1] + dy
+            if not (0 <= nx < cols and 0 <= ny < rows):
+                continue
+            wx, wy = to_world(nx, ny)
+            hcost, blocked = _cell_hazard_cost(wx, wy)
+            if blocked:
+                continue
+            step = PATH_GRID * (1.414 if dx and dy else 1.0)
+            tentative = g_score[cur] + step + hcost * PATH_GRID
+            if tentative < g_score.get((nx, ny), float("inf")):
+                came_from[(nx, ny)] = cur
+                g_score[(nx, ny)] = tentative
+                _heapq.heappush(open_heap, (tentative + heuristic((nx, ny)), (nx, ny)))
+
+    if goal_c not in came_from and goal_c != start_c:
+        return None, None
+
+    # Reconstruct
+    path_cells = [goal_c]
+    while path_cells[-1] != start_c:
+        prev = came_from.get(path_cells[-1])
+        if prev is None:
+            break
+        path_cells.append(prev)
+    path_cells.reverse()
+
+    # Convert to world waypoints + total hazard exposure
+    waypoints = []
+    total_exposure = 0.0
+    for c in path_cells:
+        wx, wy = to_world(*c)
+        hc, _ = _cell_hazard_cost(wx, wy)
+        total_exposure += hc
+        waypoints.append([round(wx, 2), round(wy, 2)])
+    # Snap the final waypoint exactly onto the goal
+    waypoints.append([round(gx, 2), round(gy, 2)])
+
+    # Simplify: drop near-collinear intermediate points
+    simplified = _simplify_path(waypoints)
+    return simplified, round(total_exposure, 2)
+
+
+def _simplify_path(pts, tol=0.6):
+    """Remove waypoints that lie almost on the line between their neighbors."""
+    if len(pts) <= 2:
+        return pts
+    out = [pts[0]]
+    for i in range(1, len(pts) - 1):
+        ax, ay = out[-1]
+        bx, by = pts[i]
+        cx, cy = pts[i + 1]
+        # perpendicular distance of b from line a-c
+        dx, dy = cx - ax, cy - ay
+        seg = _math.hypot(dx, dy) or 1e-6
+        dist = abs((bx - ax) * dy - (by - ay) * dx) / seg
+        if dist > tol:
+            out.append(pts[i])
+    out.append(pts[-1])
+    return out
+
+
+@app.route("/api/rover/plan_path", methods=["POST"])
+def plan_path():
+    """
+    Plan the safest route (avoiding hazards + radiation) from the rover to a goal.
+    Body: {target: "nearest_sample" | "safest" } or {x, y} for an explicit goal.
+    """
+    data = request.get_json(silent=True) or {}
+    start = (_rover_state["x"], _rover_state["y"])
+
+    goal = None
+    goal_label = ""
+    if "x" in data and "y" in data:
+        goal = (float(data["x"]), float(data["y"]))
+        goal_label = f"point ({goal[0]:.0f}, {goal[1]:.0f})"
+    else:
+        site, _ = _nearest_sample()
+        if site is None:
+            return jsonify({"ok": False, "message": "No uncollected samples to route to."}), 200
+        goal = (site["x"], site["y"])
+        goal_label = f"{site['id']} ({site['type']})"
+
+    waypoints, exposure = _plan_path(start, goal)
+    if not waypoints:
+        return jsonify({"ok": False,
+                        "message": f"No safe route to {goal_label} — hazards fully block the way."}), 200
+
+    # Path length
+    length = 0.0
+    for i in range(1, len(waypoints)):
+        length += _math.hypot(waypoints[i][0] - waypoints[i - 1][0],
+                              waypoints[i][1] - waypoints[i - 1][1])
+
+    _rover_state["planned_path"] = waypoints
+    payload = {
+        "ok": True,
+        "goal": goal_label,
+        "waypoints": waypoints,
+        "length_m": round(length, 1),
+        "hazard_exposure": exposure,
+        "message": f"Safe route to {goal_label}: {len(waypoints)} waypoints, "
+                   f"{round(length, 1)} m, hazard exposure {exposure}.",
+    }
+    socketio.emit("path_planned", payload, to="/")
+    return jsonify(payload)
+
+
+@app.route("/api/rover/clear_path", methods=["POST"])
+def clear_path():
+    _rover_state.pop("planned_path", None)
+    socketio.emit("path_planned", {"ok": True, "waypoints": []}, to="/")
+    return jsonify({"ok": True})
+
+
 @app.route("/api/rover/move", methods=["POST"])
 def move_rover():
     data = request.get_json()
@@ -705,9 +1090,7 @@ def move_rover():
     speed = _rover_state["speed"]
 
     if direction == "reset":
-        _rover_state.update({"x": 0.0, "y": 0.0, "heading": 0.0,
-                              "battery": 100.0, "odometer": 0.0, "trail": [], "alerts": []})
-        return jsonify({"ok": True, **_rover_state})
+        return jsonify({"ok": True, **_full_reset()})
 
     # Absolute, screen-aligned 8-directional movement (like a top-down game d-pad).
     # +y = up/north, +x = right/east. Independent of which way the rover faces.
@@ -746,7 +1129,38 @@ def move_rover():
     payload = {**_rover_state, "alerts": alerts,
                "nearest_sample": _nearest_sample_info(),
                "field_scan": _field_scan()}
-    socketio.emit("rover_moved", payload, to="/")
+    socketio.emit("rover_moved", payload, namespace="/")
+    return jsonify(payload)
+
+
+@app.route("/api/rover/goto", methods=["POST"])
+def goto_point():
+    """Move the rover one hop to an absolute (x, y) — used by auto-drive to follow a path."""
+    data = request.get_json(silent=True) or {}
+    try:
+        tx, ty = float(data["x"]), float(data["y"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "x and y required"}), 400
+
+    dx = tx - _rover_state["x"]
+    dy = ty - _rover_state["y"]
+    dist = _math.hypot(dx, dy)
+    if dist > 0.01:
+        _rover_state["heading"] = round(_math.degrees(_math.atan2(dx, dy)) % 360, 1)
+    _rover_state["x"] = round(tx, 2)
+    _rover_state["y"] = round(ty, 2)
+    _rover_state["odometer"] = round(_rover_state["odometer"] + dist, 2)
+    _rover_state["battery"] = max(0, round(_rover_state["battery"] - dist * 0.05, 2))
+    _rover_state["trail"].append([_rover_state["x"], _rover_state["y"]])
+    if len(_rover_state["trail"]) > 200:
+        _rover_state["trail"] = _rover_state["trail"][-200:]
+
+    alerts = _check_rover_hazards()
+    _rover_state["alerts"] = alerts
+    payload = {**_rover_state, "alerts": alerts,
+               "nearest_sample": _nearest_sample_info(),
+               "field_scan": _field_scan()}
+    socketio.emit("rover_moved", payload, namespace="/")
     return jsonify(payload)
 
 
@@ -783,7 +1197,7 @@ def collect_sample():
     payload = {**_rover_state, "alerts": _check_rover_hazards(),
                "nearest_sample": _nearest_sample_info(),
                "field_scan": _field_scan()}
-    socketio.emit("rover_moved", payload, to="/")
+    socketio.emit("rover_moved", payload, namespace="/")
     return jsonify({"ok": True,
                     "message": f"Collected {site['type'].title()} ({site['id']}) — value {site['value']:.2f}",
                     "sample": record, **payload})
@@ -796,7 +1210,7 @@ def rotate_rover():
     _rover_state["heading"] = (_rover_state["heading"] + degrees) % 360
     payload = {**_rover_state, "alerts": _check_rover_hazards(),
                "nearest_sample": _nearest_sample_info(), "field_scan": _field_scan()}
-    socketio.emit("rover_moved", payload, to="/")
+    socketio.emit("rover_moved", payload, namespace="/")
     return jsonify(payload)
 
 
@@ -814,8 +1228,55 @@ def get_live_readings():
     """Return the current env-probe row (updates every 2 s)."""
     row = _current_env_row()
     if not row:
-        return jsonify({"error": "Env-probe CSV not loaded"}), 503
+        return jsonify({"error": "Live environment data not loaded"}), 503
     return jsonify(row)
+
+
+@app.route("/api/lunar-map", methods=["GET"])
+def get_lunar_probability_map():
+    """Return a modeled lunar probability surface."""
+    rows = request.args.get("rows", default=10, type=int)
+    cols = request.args.get("cols", default=16, type=int)
+    return jsonify(moon_map_generator.generate_map(rows=rows, cols=cols))
+
+
+@app.route("/api/astronaut/health", methods=["GET", "POST"])
+def get_astronaut_health_snapshot():
+    """Return live astronaut heart-rate and radiation safety estimates."""
+    payload = request.get_json(silent=True) or {}
+    payload.update({k: v for k, v in request.args.items()})
+
+    # Coerce obvious numeric inputs so the dashboard can override defaults.
+    numeric_keys = {
+        "baseline_heart_rate",
+        "radiation_usv_h",
+        "temperature_c",
+        "suit_pressure",
+        "oxygen_saturation",
+        "co2_level",
+        "dust_level",
+        "metabolic_rate",
+        "fatigue_level",
+        "work_duration",
+    }
+    for key in numeric_keys:
+        if key in payload:
+            try:
+                if key in {"baseline_heart_rate", "oxygen_saturation"}:
+                    payload[key] = int(float(payload[key]))
+                else:
+                    payload[key] = float(payload[key])
+            except (TypeError, ValueError):
+                payload.pop(key, None)
+
+    snapshot = _build_astronaut_health_snapshot(overrides=payload)
+    return jsonify(snapshot)
+
+
+@app.route("/api/alerts", methods=["GET"])
+def get_recent_alerts():
+    """Return the most recent safety alerts."""
+    return jsonify(list(recent_safety_alerts))
 
 
 # Sensor Data Endpoints
@@ -909,6 +1370,8 @@ def get_sensor_capabilities(sensor_type):
 def handle_connect():
     """Handle client connection."""
     emit("connected", {"data": "Connected to Mission Control API"})
+    emit("safety_snapshot", _build_astronaut_health_snapshot())
+    emit("safety_alerts", list(recent_safety_alerts))
 
 
 @socketio.on("disconnect")

@@ -18,6 +18,7 @@
         </div>
     </div>
     <div class="header-right">
+        <button id="restart-sim-btn" class="btn-restart" onclick="restartSimulation()" title="Restart the whole simulation">⟳ Restart Simulation</button>
         <span id="connection-status" class="conn-status">● Connecting...</span>
     </div>
 </header>
@@ -146,6 +147,16 @@
                         </button>
                         <div id="nearest-sample" class="nearest-sample">No samples remaining</div>
 
+                        <div class="path-controls">
+                            <button id="plan-path-btn" class="btn-path" onclick="planSafePath()">
+                                🛰 Plan Safe Route
+                            </button>
+                            <button id="autodrive-btn" class="btn-path autodrive" onclick="toggleAutoDrive()" disabled>
+                                ▶ Auto-Drive
+                            </button>
+                        </div>
+                        <div id="path-info" class="path-info"></div>
+
                         <div id="rover-coords" class="rover-coords">x: 0.0, y: 0.0 | hdg: 0°</div>
                     </div>
                 </div>
@@ -163,12 +174,16 @@
 
                 <div class="card map-card">
                     <div class="card-header">
-                        Terrain Map
+                        Lunar Surface — Exploration
+                        <span class="hint">drive to reveal terrain · fog of war</span>
                         <span id="rover-coords-map" class="live-ts">x: 0.0, y: 0.0 | hdg: 0°</span>
                         <div id="hazard-strip" class="hazard-strip"></div>
                     </div>
                     <div class="map-body">
                         <canvas id="terrain-canvas" width="640" height="440"></canvas>
+                    </div>
+                    <div class="map-footer">
+                        <div id="moon-map-summary" class="map-summary">Loading lunar probability surface...</div>
                     </div>
                 </div>
 
@@ -189,6 +204,58 @@
             <!-- RIGHT: Live Sensor Readings -->
             <aside class="dash-right">
 
+                <div class="right-column health-column">
+                <div class="card health-panel">
+                    <div class="card-header">
+                        Astronaut Health
+                        <span class="hint">heart rate forecast</span>
+                    </div>
+                    <div class="card-body health-panel-body">
+                        <div class="health-metric">
+                            <div class="health-metric-label">Predicted Heart Rate</div>
+                            <div class="health-metric-value"><span id="astronaut-hr">--</span> <span class="health-metric-unit">bpm</span></div>
+                        </div>
+                        <div id="astronaut-hr-status" class="health-status-pill">Awaiting live conditions</div>
+                        <div class="health-submetric">
+                            <span class="health-submetric-label">Radiation</span>
+                            <span class="health-submetric-value" id="astronaut-radiation">--</span>
+                            <span class="health-submetric-unit">µSv/h</span>
+                        </div>
+                        <div class="health-submetric">
+                            <span class="health-submetric-label">Suit Pressure</span>
+                            <span class="health-submetric-value" id="astronaut-pressure">--</span>
+                            <span class="health-submetric-unit">PSI</span>
+                        </div>
+                        <div class="health-warning-title">Warning Signs</div>
+                        <ul id="astronaut-warning-signs" class="health-warning-list">
+                            <li>Waiting for live safety snapshot</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="card alerts-panel">
+                    <div class="card-header">
+                        Safety Alerts
+                        <span class="hint">high radiation notifications</span>
+                    </div>
+                    <div class="card-body" style="padding:8px 10px;">
+                        <div id="alerts-container" class="alerts-list">
+                            <p class="placeholder">No active alerts</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Samples Collected</div>
+                    <div class="card-body" style="padding:8px 10px;">
+                        <div id="samples-container" class="samples-list">
+                            <p class="placeholder">No samples yet</p>
+                        </div>
+                    </div>
+                </div>
+                </div>
+
+                <div class="right-column sensor-column">
                 <div class="card sensor-panel">
                     <div class="card-header">
                         Live Sensors
@@ -318,14 +385,6 @@
 
                     </div>
                 </div>
-
-                <div class="card">
-                    <div class="card-header">Samples Collected</div>
-                    <div class="card-body" style="padding:8px 10px;">
-                        <div id="samples-container" class="samples-list">
-                            <p class="placeholder">No samples yet</p>
-                        </div>
-                    </div>
                 </div>
 
             </aside>
