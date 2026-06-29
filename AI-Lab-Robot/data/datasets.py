@@ -367,6 +367,27 @@ class MissionDatasets:
         }
 
     @staticmethod
+    def radar_survey() -> Dict:
+        """Real mock radar observations converted to mission format."""
+        try:
+            from data.radar_dataset import RadarMissionDataset
+            mission = RadarMissionDataset.load_radar_mission()
+            if mission:
+                return mission
+        except Exception as e:
+            print(f"Warning: Could not load radar dataset: {e}")
+
+        # Fallback to simple dataset if radar loading fails
+        return {
+            "name": "Radar Survey",
+            "description": "Real mock radar observations from mock_radar_observations_1hour.csv",
+            "terrain_difficulty": "medium",
+            "num_locations": 0,
+            "locations": [],
+            "source": "datasets/mock_radar_observations_1hour.csv",
+        }
+
+    @staticmethod
     def all_datasets() -> Dict[str, Dict]:
         """Return all available datasets."""
         return {
@@ -375,6 +396,7 @@ class MissionDatasets:
             "crater": MissionDatasets.crater_exploration(),
             "hazard": MissionDatasets.hazardous_zone(),
             "drill": MissionDatasets.subsurface_drill_sites(),
+            "radar": MissionDatasets.radar_survey(),
         }
 
 
